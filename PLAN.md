@@ -201,13 +201,13 @@ Out of scope for v1:
   for B-cases come from a fixed-seed Park-Miller LCG (SHMIP-style but
   not bit-exact). SHMIP C is intentionally not supported (real C
   resolution requires `dt ~ minutes`, out of scope).
-- Domain-border BC `par%bc_border` (+ `par%H_w_bc`) applied on the
+- Domain-border BC `par%mask_bc` (+ `par%H_w_bc`) applied on the
   i=1, i=nx, j=1, j=ny rim, for any method that wrote H_w (BUCKET, K24):
-  - `BC_BORDER_ZERO`    -- H_w = 0 on the rim
-  - `BC_BORDER_IMPOSED` -- H_w = `par%H_w_bc` on the rim
-  - `BC_BORDER_MIRROR`  -- H_w on rim copied from inward neighbor (Neumann)
+  - `MASK_BC_ZERO`    -- H_w = 0 on the rim
+  - `MASK_BC_IMPOSED` -- H_w = `par%H_w_bc` on the rim
+  - `MASK_BC_MIRROR`  -- H_w on rim copied from inward neighbor (Neumann)
   Yelmo's floating-cell logic (H_w = H_w_max on floating + adjacent,
-  H_w = 0 on grounded-ice-free) stays hardcoded, independent of `bc_border`.
+  H_w = 0 on grounded-ice-free) stays hardcoded, independent of `mask_bc`.
 
 ## Resolved: K24 H_w interpretation
 

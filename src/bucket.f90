@@ -22,14 +22,14 @@ module fast_hydrology_bucket
     integer, parameter :: sp = kind(1.0)
     integer, parameter :: wp = sp
 
-    ! ---------- Domain-border BC enum (par%bucket%bc_border) ----------
+    ! ---------- Domain-border BC enum (par%mask_bc) ----------
     ! Controls how H_w is treated on the outer halo of the domain (the
     ! i=1, i=nx, j=1, j=ny rim of cells). Yelmo's floating-cell logic
     ! (H_w = H_w_max on floating + adjacent-to-floating) is independent
     ! and always applied; grounded-ice-free cells are always set to 0.
-    integer, parameter, public :: BC_BORDER_ZERO    = 0  ! H_w = 0 at the rim
-    integer, parameter, public :: BC_BORDER_IMPOSED = 1  ! H_w = par%bucket%H_w_bc at the rim
-    integer, parameter, public :: BC_BORDER_MIRROR  = 2  ! H_w mirrored from the inward neighbor (Neumann)
+    integer, parameter, public :: MASK_BC_ZERO    = 0  ! H_w = 0 at the rim
+    integer, parameter, public :: MASK_BC_IMPOSED = 1  ! H_w = par%H_w_bc at the rim
+    integer, parameter, public :: MASK_BC_MIRROR  = 2  ! H_w mirrored from the inward neighbor (Neumann)
 
     type bucket_param_class
         real(wp) :: till_rate          ! [m/a] drainage rate (water equiv.)
@@ -41,7 +41,7 @@ module fast_hydrology_bucket
     public :: bucket_par_load
     public :: calc_bucket
     public :: apply_floating_override
-    public :: apply_border_bc
+    public :: apply_mask_bc
 
 contains
 
@@ -168,14 +168,14 @@ contains
 
     end subroutine apply_floating_override
 
-    subroutine apply_border_bc(H_w, bc_border, H_w_bc)
+    subroutine apply_mask_bc(H_w, mask_bc, H_w_bc)
         ! Apply the domain-border BC at the i=1, i=nx, j=1, j=ny rim.
         ! Acts after the main update and after the floating-cell logic.
 
         implicit none
 
         real(wp), intent(INOUT) :: H_w(:,:)
-        integer,  intent(IN)    :: bc_border
+        integer,  intent(IN)    :: mask_bc
         real(wp), intent(IN)    :: H_w_bc
 
         integer :: nx, ny
@@ -183,21 +183,21 @@ contains
         nx = size(H_w,1)
         ny = size(H_w,2)
 
-        select case (bc_border)
+        select case (mask_bc)
 
-            case (BC_BORDER_ZERO)
+            case (MASK_BC_ZERO)
                 H_w(1,:)  = 0.0_wp
                 H_w(nx,:) = 0.0_wp
                 H_w(:,1)  = 0.0_wp
                 H_w(:,ny) = 0.0_wp
 
-            case (BC_BORDER_IMPOSED)
+            case (MASK_BC_IMPOSED)
                 H_w(1,:)  = H_w_bc
                 H_w(nx,:) = H_w_bc
                 H_w(:,1)  = H_w_bc
                 H_w(:,ny) = H_w_bc
 
-            case (BC_BORDER_MIRROR)
+            case (MASK_BC_MIRROR)
                 if (nx >= 2) then
                     H_w(1,:)  = H_w(2,:)
                     H_w(nx,:) = H_w(nx-1,:)
@@ -208,13 +208,13 @@ contains
                 end if
 
             case default
-                write(*,*) "apply_border_bc:: error: unknown bc_border = ", bc_border
+                write(*,*) "apply_mask_bc:: error: unknown mask_bc = ", mask_bc
                 stop
 
         end select
 
         return
 
-    end subroutine apply_border_bc
+    end subroutine apply_mask_bc
 
 end module fast_hydrology_bucket

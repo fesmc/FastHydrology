@@ -17,8 +17,8 @@
     dx             = 0.0          ! [m] overwritten by driver
     dy             = 0.0          ! [m] overwritten by driver
     H_w_max        = 2.0          ! [m]
-    bc_border      = 0            ! 0=ZERO 1=IMPOSED 2=MIRROR (BC at domain edges i=1,nx,j=1,ny)
-    H_w_bc         = 0.0          ! [m] imposed H_w at the domain border (bc_border=1)
+    mask_bc        = 0            ! 0=ZERO 1=IMPOSED 2=MIRROR (BC at domain edges i=1,nx,j=1,ny)
+    H_w_bc         = 0.0          ! [m] imposed H_w at the domain border (mask_bc=1)
     tau_H          = 0.0          ! [a] 0 => instant equilibrium
     k24_update_H_w = .true.
 /
