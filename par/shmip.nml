@@ -1,5 +1,6 @@
 &shmip
     case          = "A1"
+    out_file      = "output/shmip.nc"
     nx            = 64
     ny            = 16
     t_start       = 0.0
@@ -8,7 +9,6 @@
     dt_out        = 1.0
     A_glen_const  = 2.5e-25
     uxy_b_const   = 1.0e-6
-    melt_const    = 2.5e-3
 /
 
 &fast_hydrology

@@ -48,8 +48,12 @@ else
     LIB_FFTW      = -L$(FFTWROOT)/lib -lfftw3 -lm
 endif
 
+# NetCDF (autodetected via nf-config / nc-config if available)
+INC_NC ?= $(shell nf-config --fflags 2>/dev/null) $(shell nc-config --cflags 2>/dev/null)
+LIB_NC ?= $(shell nf-config --flibs  2>/dev/null) $(shell nc-config --libs   2>/dev/null)
+
 LFLAGS_EXTRA ?=
-LFLAGS = $(LIB_FESMUTILS) $(LIB_FFTW) $(LFLAGS_EXTRA)
+LFLAGS = $(LIB_FESMUTILS) $(LIB_FFTW) $(LIB_NC) $(LFLAGS_EXTRA)
 
 ###############################################
 ## Source list
@@ -73,7 +77,7 @@ fasthydro_objs = \
 
 $(objdir)/%.o : $(srcdir)/%.f90
 	@mkdir -p $(objdir)
-	$(FC) $(DFLAGS) $(FFLAGS) $(INC_FESMUTILS) $(INC_FFTW) -c $< -o $@
+	$(FC) $(DFLAGS) $(FFLAGS) $(INC_FESMUTILS) $(INC_FFTW) $(INC_NC) -c $< -o $@
 
 # Explicit dependencies (Fortran module order)
 $(objdir)/closures.o       : $(srcdir)/closures.f90
@@ -102,7 +106,7 @@ lib: $(fasthydro_objs)
 
 shmip: lib
 	@mkdir -p $(bindir)
-	$(FC) $(DFLAGS) $(FFLAGS) $(INC_FESMUTILS) $(INC_FFTW) \
+	$(FC) $(DFLAGS) $(FFLAGS) $(INC_FESMUTILS) $(INC_FFTW) $(INC_NC) \
 	    -o $(bindir)/shmip.x $(testdir)/shmip.f90 \
 	    -L$(libdir) -lfasthydro $(LFLAGS)
 	@echo ""
