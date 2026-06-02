@@ -1,0 +1,60 @@
+&shmip
+    case          = "A1"
+    nx            = 64
+    ny            = 16
+    t_start       = 0.0
+    t_end         = 10.0
+    dt_step       = 0.1
+    dt_out        = 1.0
+    A_glen_const  = 2.5e-25
+    uxy_b_const   = 1.0e-6
+    melt_const    = 2.5e-3
+/
+
+&fast_hydrology
+    method         = 2            ! 0=NONE 1=BUCKET 2=K24
+    init_method    = 0            ! 0=ZERO 1=EXTERNAL
+    dx             = 0.0          ! [m] overwritten by driver
+    dy             = 0.0          ! [m] overwritten by driver
+    H_w_max        = 2.0          ! [m]
+    tau_H          = 0.0          ! [a] 0 => instant equilibrium
+    k24_update_H_w = .true.
+/
+
+&fast_hydrology_bucket
+    till_rate = 1.0e-3            ! [m/a]
+    N_closure = 1                 ! 0=NONE 1=OVERBURDEN 2=MARINE 3=TILL 4=TWO_VALUE
+/
+
+&fast_hydrology_closures
+    rho_ice          = 917.0
+    g                = 9.81
+    marine_p         = 1.0
+    marine_rho_sw    = 1028.0
+    till_N0          = 1000.0
+    till_delta       = 0.02
+    till_e0          = 0.69
+    till_Cc          = 0.12
+    two_value_delta  = 0.02
+/
+
+&fast_hydrology_k24
+    substrate_type               = 0
+    flux_solver                  = 0
+    water_density                = 1000.0
+    ice_density                  = 917.0
+    gravity                      = 9.81
+    manning_exponent             = 3.0
+    latent_heat_water            = 3.35e5
+    bed_thickness                = 0.1
+    manning_coefficient_exponent = 1.25
+    bed_friction_exponent        = 1.5
+    friction_factor              = 0.1
+    till_factor                  = 1.1
+    critical_discharge           = 1.0
+    initial_cavity_height        = 0.1
+    coupling_length              = 1.0e4
+    long_coupling_water          = 5.0
+    seconds_per_year             = 3.154e7
+    min_pressure_fraction        = 0.02
+/

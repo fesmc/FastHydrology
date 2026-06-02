@@ -156,7 +156,7 @@ contains
     ! ============================================================
     ! Top-level K24 driver
     ! ============================================================
-    subroutine calc_k24(q_x, q_y, N, p_w, &
+    subroutine calc_k24(q_x, q_y, N, p_w, H_w, &
                        H_ice, z_bed, mask, bmb_w, uxy_b, A_glen, kappa, &
                        dx, par)
 
@@ -165,6 +165,7 @@ contains
         real(dp), intent(OUT) :: q_x(:,:), q_y(:,:)     ! water flux components
         real(dp), intent(OUT) :: N(:,:)                 ! effective pressure
         real(dp), intent(OUT) :: p_w(:,:)               ! water pressure (Po - N)
+        real(dp), intent(OUT) :: H_w(:,:)               ! water layer thickness (= H_conduit)
         real(dp), intent(IN)  :: H_ice(:,:)
         real(dp), intent(IN)  :: z_bed(:,:)
         real(dp), intent(IN)  :: mask(:,:)
@@ -305,6 +306,7 @@ contains
                     q_y(i,j) = 0.0_dp
                 end if
                 p_w(i,j) = Po(i,j) - N(i,j)
+                H_w(i,j) = H_conduit(i,j)
             end do
         end do
 
