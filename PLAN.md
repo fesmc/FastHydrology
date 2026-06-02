@@ -197,13 +197,17 @@ Out of scope for v1:
 ## Post-v1 follow-ups (landed)
 
 - NetCDF output via fesm-utils `ncio` (no variable tables).
-- SHMIP cases A1..A6, B1..B5, C1..C4, D1..D5 in the driver.
-  - C-cases (diurnal moulin) are placeholders: real SHMIP C requires
-    `dt ~ minutes`, not the year-scale dt the driver uses by default.
-- Boundary-condition enum `par%bucket%mask_ice` for floating cells:
-  - `MASK_ICE_ZERO`    -- H_w = 0
-  - `MASK_ICE_IMPOSED` -- H_w = `par%bucket%H_w_bc` (yelmo-equivalent default)
-  - `MASK_ICE_MIRROR`  -- mean of grounded-ice-interior neighbors
+- SHMIP cases A1..A6, B1..B5, D1..D5 in the driver. Moulin positions
+  for B-cases come from a fixed-seed Park-Miller LCG (SHMIP-style but
+  not bit-exact). SHMIP C is intentionally not supported (real C
+  resolution requires `dt ~ minutes`, out of scope).
+- Domain-border BC `par%bc_border` (+ `par%H_w_bc`) applied on the
+  i=1, i=nx, j=1, j=ny rim, for any method that wrote H_w (BUCKET, K24):
+  - `BC_BORDER_ZERO`    -- H_w = 0 on the rim
+  - `BC_BORDER_IMPOSED` -- H_w = `par%H_w_bc` on the rim
+  - `BC_BORDER_MIRROR`  -- H_w on rim copied from inward neighbor (Neumann)
+  Yelmo's floating-cell logic (H_w = H_w_max on floating + adjacent,
+  H_w = 0 on grounded-ice-free) stays hardcoded, independent of `bc_border`.
 
 ## Resolved: K24 H_w interpretation
 
