@@ -142,8 +142,8 @@ contains
                 stop
         end select
 
-        ! Always-applied floating + adjacent override
-        call apply_floating_override(hyd%now%H_w, f_ice, f_grnd, hyd%par%H_w_max)
+        ! Always-applied floating + adjacent BC (per par%bucket%mask_ice).
+        call apply_floating_override(hyd%now%H_w, f_ice, f_grnd, hyd%par%bucket)
 
         hyd%now%dHwdt = 0.0_wp
         hyd%now%p_w   = 0.0_wp
@@ -209,7 +209,7 @@ contains
             case (HYDRO_METHOD_BUCKET)
                 if (dt_step > 0.0_wp) then
                     call calc_bucket(hyd%now%H_w, f_ice, f_grnd, mask, bmb_w, &
-                                     dt_step, hyd%par%bucket%till_rate, hyd%par%H_w_max)
+                                     dt_step, hyd%par%bucket, hyd%par%H_w_max)
                 end if
                 call apply_N_closure(hyd, H_ice, z_bed, z_sl, f_ice, f_grnd)
 

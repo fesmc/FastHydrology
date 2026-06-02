@@ -1,5 +1,5 @@
 &shmip
-    case          = "A1"
+    case          = "B3"
     out_file      = "output/shmip.nc"
     nx            = 64
     ny            = 16
@@ -12,7 +12,7 @@
 /
 
 &fast_hydrology
-    method         = 2            ! 0=NONE 1=BUCKET 2=K24
+    method         = 1            ! 0=NONE 1=BUCKET 2=K24
     init_method    = 0            ! 0=ZERO 1=EXTERNAL
     dx             = 0.0          ! [m] overwritten by driver
     dy             = 0.0          ! [m] overwritten by driver
@@ -24,6 +24,8 @@
 &fast_hydrology_bucket
     till_rate = 1.0e-3            ! [m/a]
     N_closure = 1                 ! 0=NONE 1=OVERBURDEN 2=MARINE 3=TILL 4=TWO_VALUE
+    mask_ice  = 1                 ! 0=ZERO 1=IMPOSED 2=MIRROR (BC at floating cells)
+    H_w_bc    = 2.0               ! [m] imposed H_w at floating cells (mask_ice=1)
 /
 
 &fast_hydrology_closures
