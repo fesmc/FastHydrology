@@ -39,6 +39,12 @@ module fast_hydrology_k24
         real(dp) :: long_coupling_water
         real(dp) :: seconds_per_year
         real(dp) :: min_pressure_fraction
+        ! W = (12 * eta_w * q / mean(|grad phi_0_smoothed|))^(1/3), clamped to
+        ! [Wmin, Wmax]. See Kazmierczak et al 2022 Eq. (8), update_W! in the
+        ! Julia reference (TakisAngelides/FastHydrology.jl/water_flux.jl).
+        real(dp) :: eta_w                          ! [Pa s] water dynamic viscosity
+        real(dp) :: W_min                          ! [m]   lower clamp on H_w
+        real(dp) :: W_max                          ! [m]   upper clamp on H_w
     end type
 
     private
@@ -88,6 +94,9 @@ contains
         par%long_coupling_water           =    5.0_dp
         par%seconds_per_year              =    3.154e7_dp
         par%min_pressure_fraction         =    0.02_dp
+        par%eta_w                         =    1.8e-3_dp
+        par%W_min                         =    1.0e-8_dp
+        par%W_max                         =    0.015_dp
 
         call nml_read(filename,"fast_hydrology_k24","substrate_type",                par%substrate_type,                init=init_pars)
         call nml_read(filename,"fast_hydrology_k24","flux_solver",                   par%flux_solver,                   init=init_pars)
@@ -107,6 +116,9 @@ contains
         call nml_read(filename,"fast_hydrology_k24","long_coupling_water",           par%long_coupling_water,           init=init_pars)
         call nml_read(filename,"fast_hydrology_k24","seconds_per_year",              par%seconds_per_year,              init=init_pars)
         call nml_read(filename,"fast_hydrology_k24","min_pressure_fraction",         par%min_pressure_fraction,         init=init_pars)
+        call nml_read(filename,"fast_hydrology_k24","eta_w",                         par%eta_w,                         init=init_pars)
+        call nml_read(filename,"fast_hydrology_k24","W_min",                         par%W_min,                         init=init_pars)
+        call nml_read(filename,"fast_hydrology_k24","W_max",                         par%W_max,                         init=init_pars)
 
         return
 
@@ -160,26 +172,18 @@ contains
                        H_ice, z_bed, mask, bmb_w, uxy_b, A_glen, kappa, &
                        dx, par)
 
-        ! TODO(K24 H_w interpretation):
-        !   H_w is currently filled from H_conduit, which in this K24 port is
-        !   derived from sqrt(S_inf), where S_inf is a steady-state conduit
-        !   cross-section area [m^2]. H_conduit therefore has units of [m]
-        !   but represents a *conduit length scale*, not the SHMIP sheet
-        !   water-layer thickness h. Observed magnitudes in the SHMIP-A test
-        !   case (~ O(100 m)) are consistent with the conduit interpretation
-        !   and inconsistent with a sheet thickness (~ O(0.01-1 m)).
-        !   Resolution requires checking the K24 reference paper (or the
-        !   fesmc/FastHydrology.jl source from which this was ported) to
-        !   identify the correct sheet-thickness quantity to output here.
-        !   The wiring (calc_k24 -> hyd%now%H_w) is intentionally left in
-        !   place so the API contract is exercised end-to-end.
+        ! H_w is the sheet water layer thickness, per Kazmierczak et al
+        ! 2022 Eq. (8): W = (12 * eta_w * q / mean(|grad phi0_smoothed|))^(1/3)
+        ! clamped to [W_min, W_max]. q is the per-conduit-spacing distributed
+        ! flux [m2/s], converted from the Fortran m_dot units below. See
+        ! update_W! in TakisAngelides/FastHydrology.jl/water_flux.jl.
 
         implicit none
 
         real(dp), intent(OUT) :: q_x(:,:), q_y(:,:)     ! water flux components
         real(dp), intent(OUT) :: N(:,:)                 ! effective pressure
         real(dp), intent(OUT) :: p_w(:,:)               ! water pressure (Po - N)
-        real(dp), intent(OUT) :: H_w(:,:)               ! sheet water layer thickness (see TODO above)
+        real(dp), intent(OUT) :: H_w(:,:)               ! sheet water layer thickness
         real(dp), intent(IN)  :: H_ice(:,:)
         real(dp), intent(IN)  :: z_bed(:,:)
         real(dp), intent(IN)  :: mask(:,:)
@@ -259,6 +263,12 @@ contains
             end do
         end do
 
+        ! ========== Sheet water-layer thickness (Kazmierczak 2022 Eq. 8) ==========
+        !   W = (12 * eta_w * q_si / mean(|grad phi_0_smoothed|))^(1/3),
+        !   clamped to [W_min, W_max]. q_si = q_flux / seconds_per_year (m2/s).
+        call compute_W_into(H_w, q_flux, abs_grad_phi, mask, &
+                            par%eta_w, par%W_min, par%W_max, par%seconds_per_year)
+
         ! ========== Effective pressure ==========
         ! Recompute potential and unsmoothed gradients (matches original program)
         do j = 1, ny
@@ -320,7 +330,7 @@ contains
                     q_y(i,j) = 0.0_dp
                 end if
                 p_w(i,j) = Po(i,j) - N(i,j)
-                H_w(i,j) = H_conduit(i,j)
+                ! H_w already populated by compute_W_into above.
             end do
         end do
 
@@ -816,6 +826,50 @@ contains
             end do
         end do
     end subroutine update_Po
+
+    subroutine compute_W_into(W, q_flux, abs_grad_phi_s, mask, eta_w, W_min, W_max, sec_per_year)
+        ! W = (12 * eta_w * q_si / mean(|grad phi_0_smoothed|))^(1/3),
+        ! clamped to [W_min, W_max]. q_flux is the per-conduit-spacing
+        ! distributed flux in [m2/a]; converted to [m2/s] via sec_per_year.
+        ! abs_grad_phi_s is the smoothed gradient magnitude [Pa/m]; its mean
+        ! over mask==1 cells is used as a single scalar (matches update_W!
+        ! in TakisAngelides/FastHydrology.jl/water_flux.jl).
+
+        implicit none
+
+        real(dp), intent(OUT) :: W(:,:)
+        real(dp), intent(IN)  :: q_flux(:,:), abs_grad_phi_s(:,:), mask(:,:)
+        real(dp), intent(IN)  :: eta_w, W_min, W_max, sec_per_year
+
+        integer  :: i, j, nx, ny, n_active
+        real(dp) :: g_mean, num, q_si
+
+        nx = size(W,1)
+        ny = size(W,2)
+
+        ! Mean of smoothed |grad phi| over mask==1 cells
+        g_mean   = 0.0_dp
+        n_active = 0
+        do j = 1, ny
+            do i = 1, nx
+                if (mask(i,j) == 1.0_dp) then
+                    g_mean   = g_mean + abs_grad_phi_s(i,j)
+                    n_active = n_active + 1
+                end if
+            end do
+        end do
+        if (n_active > 0) g_mean = g_mean / real(n_active, dp)
+        g_mean = max(g_mean, 1.0e-12_dp)
+
+        do j = 1, ny
+            do i = 1, nx
+                q_si    = q_flux(i,j) / sec_per_year
+                num     = 12.0_dp * eta_w * q_si / g_mean
+                W(i,j)  = max(W_min, min(W_max, num**(1.0_dp/3.0_dp)))
+            end do
+        end do
+
+    end subroutine compute_W_into
 
     subroutine update_S_inf(S_inf, K, alpha, beta, abs_grad_phi, Q)
         implicit none

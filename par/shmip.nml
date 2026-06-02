@@ -1,5 +1,5 @@
 &shmip
-    case          = "B3"
+    case          = "A5"
     out_file      = "output/shmip.nc"
     nx            = 64
     ny            = 16
@@ -12,7 +12,7 @@
 /
 
 &fast_hydrology
-    method         = 1            ! 0=NONE 1=BUCKET 2=K24
+    method         = 2            ! 0=NONE 1=BUCKET 2=K24
     init_method    = 0            ! 0=ZERO 1=EXTERNAL
     dx             = 0.0          ! [m] overwritten by driver
     dy             = 0.0          ! [m] overwritten by driver
@@ -59,4 +59,7 @@
     long_coupling_water          = 5.0
     seconds_per_year             = 3.154e7
     min_pressure_fraction        = 0.02
+    eta_w                        = 1.8e-3        ! [Pa s] water dynamic viscosity (Kazmierczak 2022)
+    W_min                        = 1.0e-8        ! [m]    H_w lower clamp
+    W_max                        = 0.015         ! [m]    H_w upper clamp
 /
