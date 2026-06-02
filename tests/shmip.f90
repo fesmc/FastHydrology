@@ -4,8 +4,9 @@ program shmip
     ! Cases:
     !   A1..A6  square slab + uniform distributed melt at SHMIP-spec rate
     !   B1..B5  square slab + moulin point sources (background = A1 rate)
-    !   C1..C4  A5 setup + diurnal moulin (NOTE: requires very small dt_step)
     !   D1..D5  A5 setup + seasonal melt forcing
+    ! (SHMIP C is not currently supported: real C resolution needs dt ~ minutes,
+    !  which is out of scope for this driver.)
     !
     ! Output written to a NetCDF file with H_w, dHwdt, N, p_w, q_x, q_y
     ! per output step.
@@ -28,12 +29,10 @@ program shmip
         real(wp_local)    :: m_s_background           ! [m/s] distributed melt
         real(wp_local)    :: Q_moulin_total           ! [m3/s] total moulin input
         real(wp_local)    :: seasonal_amp             ! [-] for D-cases
-        real(wp_local)    :: diurnal_amp              ! [-] for C-cases
         integer           :: ix_moulin(N_MOULIN)
         integer           :: jy_moulin(N_MOULIN)
         logical           :: has_moulins
         logical           :: is_seasonal
-        logical           :: is_diurnal
         real(wp_local)    :: dx, dy
     end type
 
@@ -153,10 +152,8 @@ contains
         cs%m_s_background = 0.0_wp_local
         cs%Q_moulin_total = 0.0_wp_local
         cs%seasonal_amp   = 0.0_wp_local
-        cs%diurnal_amp    = 0.0_wp_local
         cs%has_moulins    = .false.
         cs%is_seasonal    = .false.
-        cs%is_diurnal     = .false.
 
         select case (trim(case_id))
             case ("A1") ; cs%m_s_background = 7.93e-11_wp_local
@@ -170,12 +167,6 @@ contains
             case ("B3") ; cs%m_s_background = 7.93e-11_wp_local ; cs%Q_moulin_total = 4.63_wp_local   ; cs%has_moulins = .true.
             case ("B4") ; cs%m_s_background = 7.93e-11_wp_local ; cs%Q_moulin_total = 23.15_wp_local  ; cs%has_moulins = .true.
             case ("B5") ; cs%m_s_background = 7.93e-11_wp_local ; cs%Q_moulin_total = 46.3_wp_local   ; cs%has_moulins = .true.
-            ! C-cases: A5 setup with diurnal moulin oscillation. Implementation
-            ! is a placeholder; real SHMIP C requires dt ~ minutes.
-            case ("C1") ; cs%m_s_background = 4.5e-8_wp_local ; cs%Q_moulin_total = 4.63_wp_local ; cs%has_moulins = .true. ; cs%is_diurnal = .true. ; cs%diurnal_amp = 0.25_wp_local
-            case ("C2") ; cs%m_s_background = 4.5e-8_wp_local ; cs%Q_moulin_total = 4.63_wp_local ; cs%has_moulins = .true. ; cs%is_diurnal = .true. ; cs%diurnal_amp = 0.5_wp_local
-            case ("C3") ; cs%m_s_background = 4.5e-8_wp_local ; cs%Q_moulin_total = 4.63_wp_local ; cs%has_moulins = .true. ; cs%is_diurnal = .true. ; cs%diurnal_amp = 1.0_wp_local
-            case ("C4") ; cs%m_s_background = 4.5e-8_wp_local ; cs%Q_moulin_total = 4.63_wp_local ; cs%has_moulins = .true. ; cs%is_diurnal = .true. ; cs%diurnal_amp = 2.0_wp_local
             ! D-cases: A5 setup with seasonal melt scaling.
             case ("D1") ; cs%m_s_background = 4.5e-8_wp_local ; cs%is_seasonal = .true. ; cs%seasonal_amp = 0.25_wp_local
             case ("D2") ; cs%m_s_background = 4.5e-8_wp_local ; cs%is_seasonal = .true. ; cs%seasonal_amp = 0.5_wp_local
@@ -184,7 +175,7 @@ contains
             case ("D5") ; cs%m_s_background = 4.5e-8_wp_local ; cs%is_seasonal = .true. ; cs%seasonal_amp = 4.0_wp_local
             case default
                 write(*,*) "shmip:: case '"//trim(case_id)//"' not recognized."
-                write(*,*) "         Supported: A1..A6, B1..B5, C1..C4, D1..D5"
+                write(*,*) "         Supported: A1..A6, B1..B5, D1..D5"
                 stop
         end select
 
@@ -226,13 +217,7 @@ contains
 
         ! Moulin point sources
         if (cs%has_moulins) then
-            Q = cs%Q_moulin_total
-            if (cs%is_diurnal) then
-                ! 1-day-period sinusoid scaled by amplitude (placeholder; needs dt ~ minutes
-                ! for proper resolution).
-                Q = Q * (1.0_wp_local + cs%diurnal_amp * sin(2.0_wp_local*PI*time*365.0_wp_local))
-                Q = max(Q, 0.0_wp_local)
-            end if
+            Q          = cs%Q_moulin_total
             q_per_cell = Q / real(N_MOULIN, wp_local) / (cs%dx * cs%dy) * SEC_PER_YEAR
             do k = 1, N_MOULIN
                 i = cs%ix_moulin(k)
@@ -244,22 +229,45 @@ contains
     end subroutine update_forcing
 
     subroutine init_moulin_positions(nx, ny, cs)
-        ! Deterministic 5x2 grid of moulin positions inside the active domain,
-        ! avoiding the boundary halo. SHMIP protocol uses fixed-seed random
-        ! placement; here we use a regular layout for reproducibility.
+        ! Pseudo-random moulin positions inside the SHMIP-B active domain:
+        !   5 km < x < 95 km    (excludes the 5 km halo at each end of the slab)
+        !   1 km < y < 19 km
+        ! Generated with a Park-Miller LCG seeded at SEED for reproducibility.
+        ! This follows the SHMIP convention of fixed-seed random placement
+        ! but is NOT bit-equivalent to the protocol's reference positions --
+        ! patch those in if a specific intercomparison is needed.
 
         implicit none
 
         integer,            intent(IN)    :: nx, ny
         type(case_state_t), intent(INOUT) :: cs
 
-        integer :: k, ix, jy
+        integer(8), parameter :: SEED   = 4242_8
+        integer(8), parameter :: PM_A   = 48271_8
+        integer(8), parameter :: PM_M   = 2147483647_8
 
+        integer(8)     :: state
+        integer        :: k
+        real(wp_local) :: u, x_frac, y_frac, x, y, x_lo, x_hi, y_lo, y_hi
+        real(wp_local) :: Lx, Ly
+
+        Lx   = (nx - 1) * cs%dx
+        Ly   = (ny - 1) * cs%dy
+        x_lo =  5.0e3_wp_local ; x_hi = max(x_lo + 1.0_wp_local, Lx - 5.0e3_wp_local)
+        y_lo =  1.0e3_wp_local ; y_hi = max(y_lo + 1.0_wp_local, Ly - 1.0e3_wp_local)
+
+        state = SEED
         do k = 1, N_MOULIN
-            ix = nint(real((mod(k-1, 5) + 1), wp_local) * real(nx, wp_local) / 6.0_wp_local)
-            jy = nint(real((         (k-1)/5  + 1), wp_local) * real(ny, wp_local) / 3.0_wp_local)
-            cs%ix_moulin(k) = max(2, min(nx-1, ix))
-            cs%jy_moulin(k) = max(2, min(ny-1, jy))
+            state = mod(state * PM_A, PM_M) ; u = real(state, wp_local) / real(PM_M, wp_local)
+            x_frac = u
+            state = mod(state * PM_A, PM_M) ; u = real(state, wp_local) / real(PM_M, wp_local)
+            y_frac = u
+
+            x = x_lo + x_frac * (x_hi - x_lo)
+            y = y_lo + y_frac * (y_hi - y_lo)
+
+            cs%ix_moulin(k) = max(2, min(nx-1, nint(x / cs%dx) + 1))
+            cs%jy_moulin(k) = max(2, min(ny-1, nint(y / cs%dy) + 1))
         end do
 
     end subroutine init_moulin_positions

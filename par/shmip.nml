@@ -1,5 +1,5 @@
 &shmip
-    case          = "A5"
+    case          = "B3"
     out_file      = "output/shmip.nc"
     nx            = 64
     ny            = 16
@@ -12,11 +12,13 @@
 /
 
 &fast_hydrology
-    method         = 2            ! 0=NONE 1=BUCKET 2=K24
+    method         = 1            ! 0=NONE 1=BUCKET 2=K24
     init_method    = 0            ! 0=ZERO 1=EXTERNAL
     dx             = 0.0          ! [m] overwritten by driver
     dy             = 0.0          ! [m] overwritten by driver
     H_w_max        = 2.0          ! [m]
+    bc_border      = 0            ! 0=ZERO 1=IMPOSED 2=MIRROR (BC at domain edges i=1,nx,j=1,ny)
+    H_w_bc         = 0.0          ! [m] imposed H_w at the domain border (bc_border=1)
     tau_H          = 0.0          ! [a] 0 => instant equilibrium
     k24_update_H_w = .true.
 /
@@ -24,8 +26,6 @@
 &fast_hydrology_bucket
     till_rate = 1.0e-3            ! [m/a]
     N_closure = 1                 ! 0=NONE 1=OVERBURDEN 2=MARINE 3=TILL 4=TWO_VALUE
-    mask_ice  = 1                 ! 0=ZERO 1=IMPOSED 2=MIRROR (BC at floating cells)
-    H_w_bc    = 2.0               ! [m] imposed H_w at floating cells (mask_ice=1)
 /
 
 &fast_hydrology_closures

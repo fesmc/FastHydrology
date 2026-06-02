@@ -40,6 +40,8 @@ module fast_hydrology
         real(wp) :: dx
         real(wp) :: dy
         real(wp) :: H_w_max
+        integer  :: bc_border          ! see bucket::BC_BORDER_* (applies to BUCKET and K24)
+        real(wp) :: H_w_bc             ! [m] imposed H_w at the domain border (BC_BORDER_IMPOSED)
         type(bucket_param_class)  :: bucket
         type(k24_param_class)     :: k24
         type(closure_param_class) :: closures
@@ -142,8 +144,10 @@ contains
                 stop
         end select
 
-        ! Always-applied floating + adjacent BC (per par%bucket%mask_ice).
-        call apply_floating_override(hyd%now%H_w, f_ice, f_grnd, hyd%par%bucket)
+        ! Always-applied: yelmo's floating-cell override (H_w = H_w_max on
+        ! floating + adjacent), then the configurable domain-border BC.
+        call apply_floating_override(hyd%now%H_w, f_ice, f_grnd, hyd%par%H_w_max)
+        call apply_border_bc(hyd%now%H_w, hyd%par%bc_border, hyd%par%H_w_bc)
 
         hyd%now%dHwdt = 0.0_wp
         hyd%now%p_w   = 0.0_wp
@@ -263,6 +267,12 @@ contains
 
         end select
 
+        ! Apply the domain-border BC for any method that wrote H_w. NONE is
+        ! a no-op so skipping it preserves host-managed border values.
+        if (hyd%par%method /= HYDRO_METHOD_NONE .and. dt_step > 0.0_wp) then
+            call apply_border_bc(hyd%now%H_w, hyd%par%bc_border, hyd%par%H_w_bc)
+        end if
+
         if (dt_step > 0.0_wp) then
             hyd%now%dHwdt = (hyd%now%H_w - H_w_old) / dt_step
         else
@@ -374,6 +384,8 @@ contains
         par%dx             = 0.0_wp
         par%dy             = 0.0_wp
         par%H_w_max        = 2.0_wp
+        par%bc_border      = BC_BORDER_ZERO
+        par%H_w_bc         = 0.0_wp
         par%tau_H          = 0.0_wp
         par%k24_update_H_w = .true.
 
@@ -382,6 +394,8 @@ contains
         call nml_read(filename,"fast_hydrology","dx",             par%dx,             init=init_pars)
         call nml_read(filename,"fast_hydrology","dy",             par%dy,             init=init_pars)
         call nml_read(filename,"fast_hydrology","H_w_max",        par%H_w_max,        init=init_pars)
+        call nml_read(filename,"fast_hydrology","bc_border",      par%bc_border,      init=init_pars)
+        call nml_read(filename,"fast_hydrology","H_w_bc",         par%H_w_bc,         init=init_pars)
         call nml_read(filename,"fast_hydrology","tau_H",          par%tau_H,          init=init_pars)
         call nml_read(filename,"fast_hydrology","k24_update_H_w", par%k24_update_H_w, init=init_pars)
 
