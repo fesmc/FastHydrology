@@ -205,12 +205,15 @@ Out of scope for v1:
   - `MASK_ICE_IMPOSED` -- H_w = `par%bucket%H_w_bc` (yelmo-equivalent default)
   - `MASK_ICE_MIRROR`  -- mean of grounded-ice-interior neighbors
 
-## Known open issue (K24 H_w interpretation)
+## Resolved: K24 H_w interpretation
 
-K24's `H_w` is currently filled from `H_conduit`, which is
-`sqrt(S_inf)` -- a *conduit length scale* in m, not the SHMIP sheet
-water-layer thickness `h`. Driver output in SHMIP-A shows H_w ~ O(100 m),
-consistent with the conduit interpretation. Needs a check against the
-K24 reference paper (and/or the fesmc/FastHydrology.jl Julia source
-from which this was ported) to identify the correct sheet-thickness
-quantity to output. See `TODO` comment in `calc_k24` ([k24.f90:159](src/k24.f90:159)).
+K24's `H_w` was initially filled from `H_conduit` (a conduit length
+scale, ~O(100 m)). Per the Julia reference
+(TakisAngelides/FastHydrology.jl/water_flux.jl, `update_W!`), the
+SHMIP-comparable sheet water-layer thickness is
+
+  `W = (12 * eta_w * q_si / mean(|grad phi0_smoothed|))^(1/3)`
+
+clamped to `[W_min, W_max]`. New k24 parameters `eta_w = 1.8e-3 Pa s`,
+`W_min = 1e-8 m`, `W_max = 0.015 m` (defaults from Kazmierczak 2022).
+SHMIP-A1 now produces H_w ~ 1.2 mm; A5 ~ 9 mm, scaling as melt^(1/3).
