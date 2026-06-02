@@ -193,3 +193,24 @@ Out of scope for v1:
 - FFTW-optional builds.
 - Per-method state sub-structs.
 - Replacing FFT smoother with a direct convolution.
+
+## Post-v1 follow-ups (landed)
+
+- NetCDF output via fesm-utils `ncio` (no variable tables).
+- SHMIP cases A1..A6, B1..B5, C1..C4, D1..D5 in the driver.
+  - C-cases (diurnal moulin) are placeholders: real SHMIP C requires
+    `dt ~ minutes`, not the year-scale dt the driver uses by default.
+- Boundary-condition enum `par%bucket%mask_ice` for floating cells:
+  - `MASK_ICE_ZERO`    -- H_w = 0
+  - `MASK_ICE_IMPOSED` -- H_w = `par%bucket%H_w_bc` (yelmo-equivalent default)
+  - `MASK_ICE_MIRROR`  -- mean of grounded-ice-interior neighbors
+
+## Known open issue (K24 H_w interpretation)
+
+K24's `H_w` is currently filled from `H_conduit`, which is
+`sqrt(S_inf)` -- a *conduit length scale* in m, not the SHMIP sheet
+water-layer thickness `h`. Driver output in SHMIP-A shows H_w ~ O(100 m),
+consistent with the conduit interpretation. Needs a check against the
+K24 reference paper (and/or the fesmc/FastHydrology.jl Julia source
+from which this was ported) to identify the correct sheet-thickness
+quantity to output. See `TODO` comment in `calc_k24` ([k24.f90:159](src/k24.f90:159)).

@@ -160,12 +160,26 @@ contains
                        H_ice, z_bed, mask, bmb_w, uxy_b, A_glen, kappa, &
                        dx, par)
 
+        ! TODO(K24 H_w interpretation):
+        !   H_w is currently filled from H_conduit, which in this K24 port is
+        !   derived from sqrt(S_inf), where S_inf is a steady-state conduit
+        !   cross-section area [m^2]. H_conduit therefore has units of [m]
+        !   but represents a *conduit length scale*, not the SHMIP sheet
+        !   water-layer thickness h. Observed magnitudes in the SHMIP-A test
+        !   case (~ O(100 m)) are consistent with the conduit interpretation
+        !   and inconsistent with a sheet thickness (~ O(0.01-1 m)).
+        !   Resolution requires checking the K24 reference paper (or the
+        !   fesmc/FastHydrology.jl source from which this was ported) to
+        !   identify the correct sheet-thickness quantity to output here.
+        !   The wiring (calc_k24 -> hyd%now%H_w) is intentionally left in
+        !   place so the API contract is exercised end-to-end.
+
         implicit none
 
         real(dp), intent(OUT) :: q_x(:,:), q_y(:,:)     ! water flux components
         real(dp), intent(OUT) :: N(:,:)                 ! effective pressure
         real(dp), intent(OUT) :: p_w(:,:)               ! water pressure (Po - N)
-        real(dp), intent(OUT) :: H_w(:,:)               ! water layer thickness (= H_conduit)
+        real(dp), intent(OUT) :: H_w(:,:)               ! sheet water layer thickness (see TODO above)
         real(dp), intent(IN)  :: H_ice(:,:)
         real(dp), intent(IN)  :: z_bed(:,:)
         real(dp), intent(IN)  :: mask(:,:)
