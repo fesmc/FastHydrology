@@ -91,6 +91,10 @@ end
 
 plot_fields = ["H_w", "N", "p_w", "|q|"]
 
+# BUCKET only writes H_w and (via the closure post-step) N. p_w and |q|
+# carry no useful information in BUCKET mode -- skip those panels.
+const BUCKET_FIELDS = Set(["H_w", "N"])
+
 println("plotting → $out_png")
 
 # Colorbar range over the *visible* (non-NaN) data so ocean cells don't
@@ -112,21 +116,25 @@ panel_cmap(field) = field in ("H_w", "|q|") ? :viridis : :balance
 fig = Figure(size = (1400, 1800))
 
 for (i, field) in enumerate(plot_fields)
-    bd     = bucket_data[field]
     kd     = k24_data[field]
-    b_rng  = panel_range(bd, field)
     k_rng  = panel_range(kd, field)
     cmap   = panel_cmap(field)
 
-    ax_b = Axis(fig[i, 1]; title = "BUCKET $(field_labels[field])",
-                xlabel = "x [km]", ylabel = "y [km]", aspect = DataAspect())
+    if field in BUCKET_FIELDS
+        bd    = bucket_data[field]
+        b_rng = panel_range(bd, field)
+        ax_b  = Axis(fig[i, 1]; title = "BUCKET $(field_labels[field])",
+                     xlabel = "x [km]", ylabel = "y [km]", aspect = DataAspect())
+        hm_b  = heatmap!(ax_b, xc, yc, bd; colorrange = b_rng, colormap = cmap, nan_color = :transparent)
+        Colorbar(fig[i, 2], hm_b)
+    else
+        Label(fig[i, 1], "BUCKET $(field_labels[field])\n(not produced)";
+              tellwidth = false, tellheight = false, fontsize = 14, color = :gray)
+    end
+
     ax_k = Axis(fig[i, 3]; title = "K24    $(field_labels[field])",
                 xlabel = "x [km]", ylabel = "y [km]", aspect = DataAspect())
-
-    hm_b = heatmap!(ax_b, xc, yc, bd; colorrange = b_rng, colormap = cmap, nan_color = :transparent)
     hm_k = heatmap!(ax_k, xc, yc, kd; colorrange = k_rng, colormap = cmap, nan_color = :transparent)
-
-    Colorbar(fig[i, 2], hm_b)
     Colorbar(fig[i, 4], hm_k)
 end
 
