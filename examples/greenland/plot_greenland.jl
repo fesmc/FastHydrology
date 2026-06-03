@@ -59,31 +59,41 @@ plot_fields = ["H_w", "N", "p_w", "|q|"]
 
 println("plotting → $out_png")
 
-# 4 rows x 2 cols (bucket | k24), one row per field
-fig = Figure(size = (1100, 1800))
+# Colorbar range for a single panel: (0, max) for nonnegative fields,
+# (-|max|, |max|) otherwise. Independent per panel because BUCKET and K24
+# differ by orders of magnitude in H_w and |q| (cap vs sheet thickness).
+function panel_range(data, field)
+    vmax = maximum(abs, data)
+    vmax = vmax > 0 ? vmax : 1.0   # avoid colorrange (0, 0)
+    if field in ("H_w", "|q|")
+        return (0.0, vmax)
+    else
+        return (-vmax, vmax)
+    end
+end
+
+panel_cmap(field) = field in ("H_w", "|q|") ? :viridis : :balance
+
+# 4 rows x 2 cols (bucket | k24), one row per field, independent colorbars
+fig = Figure(size = (1400, 1800))
 
 for (i, field) in enumerate(plot_fields)
-    bd = bucket_data[field]
-    kd = k24_data[field]
-    vmax = max(maximum(abs, bd), maximum(abs, kd))
-    vmin = field == "H_w" ? 0.0 : -vmax
-    if field in ("H_w", "|q|")
-        crange = (0.0, vmax)
-        cmap   = :viridis
-    else
-        crange = (vmin, vmax)
-        cmap   = :balance
-    end
+    bd     = bucket_data[field]
+    kd     = k24_data[field]
+    b_rng  = panel_range(bd, field)
+    k_rng  = panel_range(kd, field)
+    cmap   = panel_cmap(field)
 
     ax_b = Axis(fig[i, 1]; title = "BUCKET $(field_labels[field])",
                 xlabel = "x [km]", ylabel = "y [km]", aspect = DataAspect())
-    ax_k = Axis(fig[i, 2]; title = "K24    $(field_labels[field])",
+    ax_k = Axis(fig[i, 3]; title = "K24    $(field_labels[field])",
                 xlabel = "x [km]", ylabel = "y [km]", aspect = DataAspect())
 
-    hm_b = heatmap!(ax_b, xc, yc, bd; colorrange = crange, colormap = cmap)
-    hm_k = heatmap!(ax_k, xc, yc, kd; colorrange = crange, colormap = cmap)
+    hm_b = heatmap!(ax_b, xc, yc, bd; colorrange = b_rng, colormap = cmap)
+    hm_k = heatmap!(ax_k, xc, yc, kd; colorrange = k_rng, colormap = cmap)
 
-    Colorbar(fig[i, 3], hm_k)
+    Colorbar(fig[i, 2], hm_b)
+    Colorbar(fig[i, 4], hm_k)
 end
 
 save(out_png, fig)
