@@ -3,29 +3,50 @@
 # written by examples/greenland/greenland.x.
 #
 # Usage:
-#     julia --project=. plot_greenland.jl                 # uses defaults
-#     julia --project=. plot_greenland.jl B_FILE K_FILE OUT_PNG
+#     julia --project=examples/greenland plot_greenland.jl                # mask ocean (default)
+#     julia --project=examples/greenland plot_greenland.jl --no-mask      # show ocean
+#     julia --project=examples/greenland plot_greenland.jl [opts] B_FILE K_FILE OUT_PNG RESTART
 #
-# Dependencies (add to a local Project.toml or your global env):
-#     NCDatasets, CairoMakie
+# By default cells with f_grnd <= 0 (ocean and partially-floating) are
+# masked out so the K24 ice-sheet pattern is visible at its native sheet
+# thickness instead of being washed out by the saturated ocean cells.
+#
+# Dependencies (see Project.toml): NCDatasets, CairoMakie.
 
 using NCDatasets
 using CairoMakie
 
-const DEFAULT_BUCKET = joinpath(@__DIR__, "..", "..", "output", "greenland_bucket.nc")
-const DEFAULT_K24    = joinpath(@__DIR__, "..", "..", "output", "greenland_k24.nc")
-const DEFAULT_OUT    = joinpath(@__DIR__, "..", "..", "output", "greenland_compare.png")
+const DEFAULT_BUCKET  = joinpath(@__DIR__, "..", "..", "output", "greenland_bucket.nc")
+const DEFAULT_K24     = joinpath(@__DIR__, "..", "..", "output", "greenland_k24.nc")
+const DEFAULT_OUT     = joinpath(@__DIR__, "..", "..", "output", "greenland_compare.png")
+const DEFAULT_RESTART = joinpath(@__DIR__, "..", "..", "input",  "GRL-16KM_yelmo_restart.nc")
 
-bucket_file = length(ARGS) >= 1 ? ARGS[1] : DEFAULT_BUCKET
-k24_file    = length(ARGS) >= 2 ? ARGS[2] : DEFAULT_K24
-out_png     = length(ARGS) >= 3 ? ARGS[3] : DEFAULT_OUT
+# --- Parse args ---
+mask_ocean = true
+positional = String[]
+for a in ARGS
+    if a == "--no-mask" || a == "--no-ocean-mask"
+        mask_ocean = false
+    elseif a == "--mask" || a == "--ocean-mask"
+        mask_ocean = true
+    else
+        push!(positional, a)
+    end
+end
+bucket_file  = length(positional) >= 1 ? positional[1] : DEFAULT_BUCKET
+k24_file     = length(positional) >= 2 ? positional[2] : DEFAULT_K24
+out_png      = length(positional) >= 3 ? positional[3] : DEFAULT_OUT
+restart_file = length(positional) >= 4 ? positional[4] : DEFAULT_RESTART
 
-# Read the final time slice of each variable from a NetCDF file
+println("loading bucket: $bucket_file")
+println("loading K24   : $k24_file")
+mask_ocean && println("loading mask  : $restart_file")
+
+# Read the final time slice of a (xc, yc, time) variable
 function load_last(ncfile, varname)
     NCDataset(ncfile, "r") do ds
         var = ds[varname]
         nt  = size(var, ndims(var))
-        # restart format: (xc, yc, time) → take t=nt slice
         return Array(var[:, :, nt])
     end
 end
@@ -36,8 +57,13 @@ function load_coords(ncfile)
     end
 end
 
-println("loading bucket: $bucket_file")
-println("loading K24   : $k24_file")
+# Apply ocean mask: replace cells with f_grnd <= 0 by NaN so they render
+# as the heatmap's nan_color (transparent / grey).
+function apply_ocean_mask(data, f_grnd)
+    out = float.(data)
+    out[f_grnd .<= 0.0] .= NaN
+    return out
+end
 
 xc, yc = load_coords(bucket_file)
 fields = ["H_w", "N", "p_w"]
@@ -55,16 +81,24 @@ bucket_data["|q|"] = sqrt.(b_qx .^ 2 .+ b_qy .^ 2)
 k24_data["|q|"]    = sqrt.(k_qx .^ 2 .+ k_qy .^ 2)
 field_labels["|q|"] = "|q| [m^2 s^-1]"
 
+if mask_ocean
+    f_grnd = load_last(restart_file, "f_grnd")
+    for f in keys(bucket_data)
+        bucket_data[f] = apply_ocean_mask(bucket_data[f], f_grnd)
+        k24_data[f]    = apply_ocean_mask(k24_data[f],    f_grnd)
+    end
+end
+
 plot_fields = ["H_w", "N", "p_w", "|q|"]
 
 println("plotting → $out_png")
 
-# Colorbar range for a single panel: (0, max) for nonnegative fields,
-# (-|max|, |max|) otherwise. Independent per panel because BUCKET and K24
-# differ by orders of magnitude in H_w and |q| (cap vs sheet thickness).
+# Colorbar range over the *visible* (non-NaN) data so ocean cells don't
+# determine the scale. (0, vmax) for nonnegative fields, otherwise (-v, v).
 function panel_range(data, field)
-    vmax = maximum(abs, data)
-    vmax = vmax > 0 ? vmax : 1.0   # avoid colorrange (0, 0)
+    vmask = .!isnan.(data)
+    vmax  = any(vmask) ? maximum(abs, data[vmask]) : 0.0
+    vmax  = vmax > 0 ? vmax : 1.0
     if field in ("H_w", "|q|")
         return (0.0, vmax)
     else
@@ -74,7 +108,7 @@ end
 
 panel_cmap(field) = field in ("H_w", "|q|") ? :viridis : :balance
 
-# 4 rows x 2 cols (bucket | k24), one row per field, independent colorbars
+# 4 rows x 4 cols (bucket | cbar | k24 | cbar), one row per field
 fig = Figure(size = (1400, 1800))
 
 for (i, field) in enumerate(plot_fields)
@@ -89,8 +123,8 @@ for (i, field) in enumerate(plot_fields)
     ax_k = Axis(fig[i, 3]; title = "K24    $(field_labels[field])",
                 xlabel = "x [km]", ylabel = "y [km]", aspect = DataAspect())
 
-    hm_b = heatmap!(ax_b, xc, yc, bd; colorrange = b_rng, colormap = cmap)
-    hm_k = heatmap!(ax_k, xc, yc, kd; colorrange = k_rng, colormap = cmap)
+    hm_b = heatmap!(ax_b, xc, yc, bd; colorrange = b_rng, colormap = cmap, nan_color = :transparent)
+    hm_k = heatmap!(ax_k, xc, yc, kd; colorrange = k_rng, colormap = cmap, nan_color = :transparent)
 
     Colorbar(fig[i, 2], hm_b)
     Colorbar(fig[i, 4], hm_k)
