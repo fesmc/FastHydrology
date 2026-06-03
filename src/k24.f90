@@ -620,6 +620,12 @@ contains
 
         nx = size(psi_out,1); ny = size(psi_out,2)
 
+        ! Initialize ALL cells so the recursion can't pick up garbage memory
+        ! from fresh allocations. mask=0 cells are pre-marked "computed = 0"
+        ! so they contribute nothing when accumulated upstream by mask=1
+        ! neighbors (physically correct: no water source outside the domain).
+        ! mask=1 cells are marked unvisited with the standard -1 sentinel.
+        psi_out = 0.0_dp
         where (mask == 1.0_dp)
             psi_out = -1.0_dp
         end where
@@ -713,9 +719,10 @@ contains
         allocate(in_degree(nx,ny))
         in_degree = 0
 
-        ! Seed psi_out with the local melt source (same as recursive base case).
-        ! Inactive cells stay untouched (matches recursive behaviour, which
-        ! only writes to mask==1 cells).
+        ! Initialize ALL cells: mask=0 cells must hold a deterministic value
+        ! (0) so they cannot contribute spurious flux upstream from
+        ! uninitialized memory. mask=1 cells seed with the local melt source.
+        psi_out = 0.0_dp
         do j = 1, ny
             do i = 1, nx
                 if (mask(i,j) == 1.0_dp) then

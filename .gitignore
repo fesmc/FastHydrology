@@ -2,3 +2,4 @@ include/
 bin/
 *.bak
 output/
+.DS_Store
