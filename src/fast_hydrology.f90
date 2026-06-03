@@ -144,9 +144,11 @@ contains
                 stop
         end select
 
-        ! Always-applied: yelmo's floating-cell override (H_w = H_w_max on
-        ! floating + adjacent), then the configurable domain-border BC.
-        call apply_floating_override(hyd%now%H_w, f_ice, f_grnd, hyd%par%H_w_max)
+        ! Floating-cell override (method-aware flavor) then the configurable
+        ! domain-border BC. See apply_floating_override for the bucket vs
+        ! K24 convention split.
+        call apply_floating_override(hyd%now%H_w, f_ice, f_grnd, hyd%par%H_w_max, &
+                                     bucket_style = (hyd%par%method /= HYDRO_METHOD_K24))
         call apply_mask_bc(hyd%now%H_w, hyd%par%mask_bc, hyd%par%H_w_bc)
 
         hyd%now%dHwdt = 0.0_wp
@@ -269,12 +271,14 @@ contains
 
         ! Post-step overrides for any method that wrote H_w (NONE skipped).
         ! Order matters:
-        !   1. floating-cell override -- yelmo convention, sets H_w = H_w_max
-        !      on floating + adjacent-to-floating cells. Cannot influence K24's
-        !      next call because calc_k24 doesn't read H_w as an input.
+        !   1. floating-cell override -- method-aware flavor. BUCKET uses
+        !      yelmo's adjacent-to-floating rule; K24 only saturates pure
+        !      open ocean. Cannot influence K24's next call because calc_k24
+        !      doesn't read H_w as an input.
         !   2. domain-border BC -- final pass on the i=1, i=nx, j=1, j=ny rim.
         if (hyd%par%method /= HYDRO_METHOD_NONE .and. dt_step > 0.0_wp) then
-            call apply_floating_override(hyd%now%H_w, f_ice, f_grnd, hyd%par%H_w_max)
+            call apply_floating_override(hyd%now%H_w, f_ice, f_grnd, hyd%par%H_w_max, &
+                                         bucket_style = (hyd%par%method /= HYDRO_METHOD_K24))
             call apply_mask_bc(hyd%now%H_w, hyd%par%mask_bc, hyd%par%H_w_bc)
         end if
 

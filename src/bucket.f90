@@ -126,10 +126,22 @@ contains
     ! floating cells, leaving all other cells untouched. Grounded ice-free
     ! cells are also forced to H_w = 0 (matches yelmo's bucket convention).
     ! ------------------------------------------------------------
-    subroutine apply_floating_override(H_w, f_ice, f_grnd, H_w_max)
-        ! Yelmo-equivalent: H_w = H_w_max on floating + adjacent-to-floating
-        ! cells; H_w = 0 on grounded ice-free cells. Always applied (init
-        ! and update). Independent of par%bucket%bc_border.
+    subroutine apply_floating_override(H_w, f_ice, f_grnd, H_w_max, bucket_style)
+        ! Two flavors:
+        !
+        !   bucket_style = .true.  (yelmo bucket convention)
+        !     H_w = H_w_max on floating cells AND grounded-ice cells adjacent
+        !     to a floating neighbor. H_w = 0 on grounded ice-free cells.
+        !     The adjacent-to-floating rule represents bucket-style drainage
+        !     at the grounding line, where the local model has no horizontal
+        !     transport.
+        !
+        !   bucket_style = .false. (K24 convention)
+        !     H_w = H_w_max only on PURE open-ocean cells (f_grnd == 0 AND
+        !     f_ice == 0). Grounded-ice cells touching the grounding line
+        !     are left untouched -- K24's distributed water flux already
+        !     handles the grounding-line region correctly. Grounded ice-free
+        !     cells still set to 0 (no water on land).
 
         implicit none
 
@@ -137,6 +149,7 @@ contains
         real(wp), intent(IN)    :: f_ice(:,:)
         real(wp), intent(IN)    :: f_grnd(:,:)
         real(wp), intent(IN)    :: H_w_max
+        logical,  intent(IN)    :: bucket_style
 
         integer :: i, j, nx, ny, im1, ip1, jm1, jp1
 
@@ -151,14 +164,22 @@ contains
             jm1 = max(j-1,1)
             jp1 = min(j+1,ny)
 
-            if (f_grnd(i,j) == 0.0_wp) then
-                H_w(i,j) = H_w_max
-            else if (f_grnd(i,j) > 0.0_wp .and. f_ice(i,j) == 1.0_wp .and. &
-                    (f_grnd(im1,j) == 0.0_wp .or. f_grnd(ip1,j) == 0.0_wp .or. &
-                     f_grnd(i,jm1) == 0.0_wp .or. f_grnd(i,jp1) == 0.0_wp) ) then
-                H_w(i,j) = H_w_max
-            else if (f_grnd(i,j) > 0.0_wp .and. f_ice(i,j) < 1.0_wp) then
-                H_w(i,j) = 0.0_wp
+            if (bucket_style) then
+                if (f_grnd(i,j) == 0.0_wp) then
+                    H_w(i,j) = H_w_max
+                else if (f_grnd(i,j) > 0.0_wp .and. f_ice(i,j) == 1.0_wp .and. &
+                        (f_grnd(im1,j) == 0.0_wp .or. f_grnd(ip1,j) == 0.0_wp .or. &
+                         f_grnd(i,jm1) == 0.0_wp .or. f_grnd(i,jp1) == 0.0_wp) ) then
+                    H_w(i,j) = H_w_max
+                else if (f_grnd(i,j) > 0.0_wp .and. f_ice(i,j) < 1.0_wp) then
+                    H_w(i,j) = 0.0_wp
+                end if
+            else
+                if (f_grnd(i,j) == 0.0_wp .and. f_ice(i,j) == 0.0_wp) then
+                    H_w(i,j) = H_w_max
+                else if (f_grnd(i,j) > 0.0_wp .and. f_ice(i,j) < 1.0_wp) then
+                    H_w(i,j) = 0.0_wp
+                end if
             end if
 
         end do
