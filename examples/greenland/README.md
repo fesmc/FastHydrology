@@ -24,9 +24,17 @@ the (xc, yc, time) Yelmo grid.
 
 ## Plot (Julia)
 
+A `Project.toml` + `Manifest.toml` are included for a reproducible
+environment. First-time setup:
+
 ```sh
-julia -e 'using Pkg; Pkg.add(["NCDatasets", "CairoMakie"])'   # first time only
-julia examples/greenland/plot_greenland.jl
+julia --project=examples/greenland -e 'using Pkg; Pkg.instantiate()'
+```
+
+Then on every run:
+
+```sh
+julia --project=examples/greenland examples/greenland/plot_greenland.jl
 ```
 
 Writes `output/greenland_compare.png` showing H_w, N, p_w, and water
