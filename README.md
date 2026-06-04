@@ -24,10 +24,11 @@ writes a resolved root `Makefile`:
 
 ```sh
 configme -m macbook -c gfortran
-make lib
+make fasthydro-static
 ```
 
-Then `lib/libfasthydro.a` is ready to link against. See `config/Makefile`
+Then `include/libfasthydro.a` is ready to link against (target name
+matches yelmo's `yelmo-static` / FastIsostasy's `isostasy-static`). See `config/Makefile`
 for the build template and `config/common.mk` for the dependency wiring
 (fesm-utils + FFTW + netCDF).
 

@@ -71,11 +71,11 @@ $(objdir)/fast_hydrology.o : $(srcdir)/fast_hydrology.f90 \
 ## Targets
 ###############################################
 
-.PHONY: all lib shmip greenland clean
+.PHONY: all fasthydro-static shmip greenland clean
 
-all: lib
+all: fasthydro-static
 
-lib: $(fasthydro_objs)
+fasthydro-static: $(fasthydro_objs)
 	@mkdir -p $(libdir)
 	ar rc $(libdir)/libfasthydro.a $(fasthydro_objs)
 	ranlib $(libdir)/libfasthydro.a
@@ -83,7 +83,7 @@ lib: $(fasthydro_objs)
 	@echo "    $(libdir)/libfasthydro.a is ready."
 	@echo ""
 
-shmip: lib
+shmip: fasthydro-static
 	@mkdir -p $(bindir)
 	$(FC) $(DFLAGS) $(FFLAGS) $(INC_FESMUTILS) \
 	    -o $(bindir)/shmip.x $(testdir)/shmip.f90 \
@@ -92,7 +92,7 @@ shmip: lib
 	@echo "    $(bindir)/shmip.x is ready."
 	@echo ""
 
-greenland: lib
+greenland: fasthydro-static
 	@mkdir -p $(bindir)
 	$(FC) $(DFLAGS) $(FFLAGS) $(INC_FESMUTILS) \
 	    -o $(bindir)/greenland.x examples/greenland/greenland.f90 \
