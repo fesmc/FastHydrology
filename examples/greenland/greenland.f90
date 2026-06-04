@@ -90,7 +90,7 @@ program greenland
     hyd%par%dy = dy_km * 1000.0_wp_local
     call hydro_init_state(hyd, z_bed, f_ice, f_grnd, 0.0_wp_local)
 
-    write(*,'(a,i0,a)') "  method  = ", hyd%par%method, " (0=NONE 1=BUCKET 2=K24)"
+    write(*,'(a,i0,a)') "  method  = ", hyd%par%method, " (-1=EXTERNAL 0=NONE 1=BUCKET 2=K24)"
     write(*,'(a,i0)')   "  N_clos  = ", hyd%par%bucket%N_closure
     write(*,'(a,i0)')   "  mask_bc = ", hyd%par%mask_bc
     write(*,'(a,es12.3,a)') "  bmb_max = ", maxval(bmb_w), " m/a (water equiv.)"

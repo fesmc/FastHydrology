@@ -7,7 +7,7 @@ or K24 model, and writes a NetCDF output suitable for plotting.
 ## Build
 
 ```sh
-make greenland FESMUTILS_DIR=../yelmo/fesm-utils
+make greenland
 ```
 
 ## Run
@@ -20,7 +20,9 @@ mkdir -p output
 
 Produces `output/greenland_bucket.nc` and `output/greenland_k24.nc`.
 Both files have the same variables (H_w, dHwdt, N, p_w, q_x, q_y) on
-the (xc, yc, time) Yelmo grid.
+the (xc, yc, time) Yelmo grid. Switch between models by editing
+`&fhyd { method }` in the `.nml` file: `-1` = EXTERNAL (host owns H_w;
+fhydro only computes N and p_w), `0` = NONE, `1` = BUCKET, `2` = K24.
 
 ## Plot (Julia)
 
