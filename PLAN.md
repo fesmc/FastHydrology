@@ -18,17 +18,19 @@ into yelmo without changing the API.
 
 ## Method dispatch
 
-`par%method` ∈ {`HYDRO_METHOD_NONE`, `HYDRO_METHOD_BUCKET`, `HYDRO_METHOD_K24`}.
-Drop the unused `HYDRO_METHOD_RESERVED = 1`.
+`par%method` ∈ {`HYDRO_METHOD_EXTERNAL`, `HYDRO_METHOD_NONE`,
+`HYDRO_METHOD_BUCKET`, `HYDRO_METHOD_K24`} (values -1, 0, 1, 2).
 
-| Method | Writes H_w | Writes q_x,q_y | Writes N        | Writes p_w        |
-|--------|------------|----------------|-----------------|-------------------|
-| NONE   | no         | no             | no              | no                |
-| BUCKET | yes        | no             | only if closure | only if closure   |
-| K24    | optional¹  | yes            | yes             | yes               |
+| Method   | Writes H_w  | Writes q_x,q_y | Writes N        | Writes p_w      |
+|----------|-------------|----------------|-----------------|-----------------|
+| EXTERNAL | no (caller) | no             | yes (closure)   | yes (closure)   |
+| NONE     | no          | no             | no              | no              |
+| BUCKET   | yes         | no             | only if closure | only if closure |
+| K24      | yes¹        | yes            | yes             | yes             |
 
-¹ Gated on `par%k24%update_H_w`; instant (`tau_H = 0`) or relaxation
-(`tau_H > 0`) toward `H_w_eq`.
+¹ K24 writes its equilibrium output directly (`hyd%now%H_w := H_w_eq`).
+Hosts can call `relax_H_w(H_w, H_w_eq, tau, dt)` on their own field to
+get instantaneous (`tau = 0`) or exponentially-relaxed evolution.
 
 ## API surface
 
@@ -62,8 +64,6 @@ par%bucket%n_marine%(...)
 par%bucket%n_till%(...)
 par%bucket%n_two_value%(...)
 
-par%k24%update_H_w              ! .true. or .false.
-par%k24%tau_H                   ! 0 = instant, > 0 = relax
 par%k24%(...existing K24 params...)
 ```
 
@@ -118,9 +118,13 @@ All fields allocated unconditionally; kappa is only *filled* in
      ice-covered interior cells evolve via `H_w += dt·(bmb_w − till_rate)`
      clamped to `[0, H_w_max]`. Floating + adjacent → H_w_max. Grounded
      ice-free → 0.
-   - `K24`: `calc_k24(...)` → `q_x, q_y, N, p_w, H_w_eq`. If
-     `update_H_w`: apply instant (`H_w := H_w_eq`) or relaxation (`H_w :=
-     H_w + (H_w_eq − H_w)·(1 − exp(−dt/tau_H))`). No clamp to H_w_max.
+   - `EXTERNAL`: H_w is owned by the host (not modified here). Run the
+     configured N closure on the caller's H_w → write `N`, `p_w`. Skip
+     floating override and mask BC.
+   - `K24`: `calc_k24(...)` → `q_x, q_y, N, p_w, H_w_eq`. Write
+     `hyd%now%H_w := H_w_eq` directly. No clamp to H_w_max. Hosts that
+     want a relaxation/instant rule on their own H_w call the public
+     elemental helper `relax_H_w(H_w, H_w_eq, tau, dt)`.
 6. If `method = BUCKET` and `par%bucket%N_closure ≠ NONE`: run closure
    post-step → write N; set `p_w = P_o − N`.
 7. (For `method = K24`, ignore `par%bucket%N_closure`; K24's N is canonical.)
@@ -138,7 +142,10 @@ All fields allocated unconditionally; kappa is only *filled* in
 
 - Add `H_w` (or `H_w_eq`) to `calc_k24`'s OUT signature. Source: existing
   `H_conduit` (computed at k24.f90:286), no new physics.
-- Wrap in `hydro_update` per the `update_H_w` / `tau_H` logic.
+- `hydro_update` assigns `hyd%now%H_w := H_w_eq` directly (no internal
+  relaxation). Time-evolution rules (instant vs. exponential) live in
+  the public elemental helper `relax_H_w(H_w, H_w_eq, tau, dt)` so hosts
+  can drive their own H_w field.
 
 ## Dependencies & build
 
@@ -167,7 +174,8 @@ yelmo's namelist groups into `par%bucket%n_<closure>%(...)`.
    and `hydro_init_state`. Drop `HYDRO_METHOD_RESERVED`. Replace `1.0e10`
    sentinel with `initialized` bool. Gate kappa init on `method = K24`.
 2. **K24 H_w output.** Add `H_w` to `calc_k24` OUT args (= `H_conduit`).
-   Wire `par%k24%update_H_w` + `par%k24%tau_H` in `hydro_update`. Add `dHwdt`
+   Write K24's equilibrium directly to `hyd%now%H_w` in `hydro_update`
+   (no internal relaxation; see public `relax_H_w` helper). Add `dHwdt`
    to state and compute via stash-and-diff.
 3. **Bucket model.** Implement `hydro_calc_bucket` mirroring yelmo's
    `calc_basal_water_local`. Wire under `case (HYDRO_METHOD_BUCKET)`. Add

@@ -1,15 +1,21 @@
 module fast_hydrology
     ! Top-level wrapper for basal-hydrology models. Dispatches to one of:
-    !   NONE   - no-op (state frozen)
-    !   BUCKET - local mass-balance bucket (yelmo-equivalent)
-    !   K24    - steady-state distributed model with FFT-smoothed gradients
+    !   EXTERNAL - H_w owned by host; closures still run on caller's H_w
+    !   NONE     - no-op (state frozen)
+    !   BUCKET   - local mass-balance bucket (yelmo-equivalent)
+    !   K24      - steady-state distributed model with FFT-smoothed gradients
     !
     ! Method-specific contracts:
-    !   NONE   : writes nothing; H_w externally managed.
-    !   BUCKET : writes H_w (with floating/grounded-ice-free overrides);
-    !            optionally writes N, p_w via par%bucket%N_closure.
-    !   K24    : writes q_x, q_y, N, p_w always; writes H_w only if
-    !            par%k24%update_H_w (instant if tau_H=0, else relaxed).
+    !   EXTERNAL : reads hyd%now%H_w as-is (host owns it); runs the
+    !              configured N closure -> writes N, p_w. No floating
+    !              override, no mask BC.
+    !   NONE     : writes nothing; H_w externally managed.
+    !   BUCKET   : writes H_w (with floating/grounded-ice-free overrides);
+    !              optionally writes N, p_w via par%bucket%N_closure.
+    !   K24      : writes q_x, q_y, N, p_w, and the equilibrium H_w that
+    !              K24 produces (hyd%now%H_w := H_w_eq directly). Hosts
+    !              that want a relaxation/instant rule on their own H_w
+    !              field can call relax_H_w(H_w, H_w_eq, tau, dt).
     !
     ! In all cases, hyd%now%dHwdt is computed as the natural-sign change
     ! over the step: (H_w_new - H_w_old) / dt.
@@ -26,9 +32,10 @@ module fast_hydrology
     integer, parameter :: wp = sp
 
     ! ---------- Method enum (par%method) ----------
-    integer, parameter, public :: HYDRO_METHOD_NONE   = 0
-    integer, parameter, public :: HYDRO_METHOD_BUCKET = 1
-    integer, parameter, public :: HYDRO_METHOD_K24    = 2
+    integer, parameter, public :: HYDRO_METHOD_EXTERNAL = -1
+    integer, parameter, public :: HYDRO_METHOD_NONE     =  0
+    integer, parameter, public :: HYDRO_METHOD_BUCKET   =  1
+    integer, parameter, public :: HYDRO_METHOD_K24      =  2
 
     ! ---------- Init-method enum (par%init_method) ----------
     integer, parameter, public :: HYDRO_INIT_ZERO     = 0
@@ -45,8 +52,6 @@ module fast_hydrology
         type(bucket_param_class)  :: bucket
         type(k24_param_class)     :: k24
         type(closure_param_class) :: closures
-        real(wp) :: tau_H              ! [a] K24 H_w relaxation timescale (0 = instant)
-        logical  :: k24_update_H_w     ! K24 writes H_w if true
     end type
 
     type hydro_state_class
@@ -72,19 +77,30 @@ module fast_hydrology
     public :: hydro_init
     public :: hydro_init_state
     public :: hydro_update
+    public :: relax_H_w
     public :: wp
 
 contains
 
-    subroutine hydro_init(hyd, filename, nx, ny)
+    subroutine hydro_init(hyd, filename, nx, ny, group)
 
         implicit none
 
-        type(hydro_class), intent(INOUT) :: hyd
-        character(len=*),  intent(IN)    :: filename
-        integer,           intent(IN)    :: nx, ny
+        type(hydro_class), intent(INOUT)        :: hyd
+        character(len=*),  intent(IN)           :: filename
+        integer,           intent(IN)           :: nx, ny
+        character(len=*),  intent(IN), optional :: group
 
-        call hydro_par_load(hyd%par, filename)
+        character(len=32) :: nml_group
+
+        ! Resolve the namelist group name (default = "fhyd").
+        if (present(group)) then
+            nml_group = trim(group)
+        else
+            nml_group = "fhyd"
+        end if
+
+        call hydro_par_load(hyd%par, filename, nml_group)
 
         if (hyd%par%dx /= hyd%par%dy) then
             write(*,*) "hydro_init:: error: K24 requires dx == dy."
@@ -188,8 +204,8 @@ contains
         real(dp), allocatable :: kappa_dp(:,:)
         real(dp), allocatable :: q_x_dp(:,:), q_y_dp(:,:), N_dp(:,:), p_w_dp(:,:), H_w_eq_dp(:,:)
 
-        real(wp), allocatable :: H_w_old(:,:), H_w_eq(:,:)
-        real(wp) :: dt_step, relax
+        real(wp), allocatable :: H_w_old(:,:)
+        real(wp) :: dt_step
         integer  :: nx, ny
 
         if (.not. hyd%now%initialized) then
@@ -208,6 +224,11 @@ contains
         hyd%now%dt   = dt_step
 
         select case (hyd%par%method)
+
+            case (HYDRO_METHOD_EXTERNAL)
+                ! Host owns H_w; we only derive N and p_w from the
+                ! configured N closure operating on the caller's H_w.
+                call apply_N_closure(hyd, H_ice, z_bed, z_sl, f_ice, f_grnd)
 
             case (HYDRO_METHOD_NONE)
                 continue
@@ -243,18 +264,7 @@ contains
                     hyd%now%q_y = real(q_y_dp, wp)
                     hyd%now%N   = real(N_dp,   wp)
                     hyd%now%p_w = real(p_w_dp, wp)
-
-                    if (hyd%par%k24_update_H_w) then
-                        allocate(H_w_eq(nx,ny))
-                        H_w_eq = real(H_w_eq_dp, wp)
-                        if (hyd%par%tau_H <= 0.0_wp) then
-                            hyd%now%H_w = H_w_eq
-                        else
-                            relax       = 1.0_wp - exp(-dt_step / hyd%par%tau_H)
-                            hyd%now%H_w = hyd%now%H_w + (H_w_eq - hyd%now%H_w) * relax
-                        end if
-                        deallocate(H_w_eq)
-                    end if
+                    hyd%now%H_w = real(H_w_eq_dp, wp)
 
                     deallocate(H_ice_dp, z_bed_dp, mask_dp)
                     deallocate(bmb_w_dp, uxy_b_dp, A_glen_dp)
@@ -263,20 +273,22 @@ contains
                 end if
 
             case default
-                write(*,*) "hydro_update:: error: method must be one of [0,1,2]."
+                write(*,*) "hydro_update:: error: method must be one of [-1,0,1,2]."
                 write(*,*) "method = ", hyd%par%method
                 stop
 
         end select
 
-        ! Post-step overrides for any method that wrote H_w (NONE skipped).
-        ! Order matters:
+        ! Post-step H_w overrides apply only to methods that *write* H_w
+        ! internally (BUCKET, K24). NONE and EXTERNAL leave H_w alone.
+        ! Order:
         !   1. floating-cell override -- method-aware flavor. BUCKET uses
         !      yelmo's adjacent-to-floating rule; K24 only saturates pure
         !      open ocean. Cannot influence K24's next call because calc_k24
         !      doesn't read H_w as an input.
         !   2. domain-border BC -- final pass on the i=1, i=nx, j=1, j=ny rim.
-        if (hyd%par%method /= HYDRO_METHOD_NONE .and. dt_step > 0.0_wp) then
+        if ((hyd%par%method == HYDRO_METHOD_BUCKET .or. &
+             hyd%par%method == HYDRO_METHOD_K24) .and. dt_step > 0.0_wp) then
             call apply_floating_override(hyd%now%H_w, f_ice, f_grnd, hyd%par%H_w_max, &
                                          bucket_style = (hyd%par%method /= HYDRO_METHOD_K24))
             call apply_mask_bc(hyd%now%H_w, hyd%par%mask_bc, hyd%par%H_w_bc)
@@ -293,6 +305,35 @@ contains
         return
 
     end subroutine hydro_update
+
+    ! ------------------------------------------------------------
+    ! Update H_w in place toward the equilibrium H_w_eq:
+    !   tau <= 0 : instantaneous  ( H_w := H_w_eq )
+    !   tau >  0 : exponential    ( H_w := H_w + (H_w_eq - H_w) *
+    !                                       (1 - exp(-dt/tau)) )
+    ! Elemental so callers can pass scalars or conformable arrays.
+    ! Intended for hosts (e.g. yelmo) that own their own H_w field and
+    ! want to evolve it toward the equilibrium produced by K24
+    ! (hyd%now%H_w with method = HYDRO_METHOD_K24).
+    ! ------------------------------------------------------------
+    elemental subroutine relax_H_w(H_w, H_w_eq, tau, dt)
+
+        implicit none
+
+        real(wp), intent(INOUT) :: H_w
+        real(wp), intent(IN)    :: H_w_eq
+        real(wp), intent(IN)    :: tau
+        real(wp), intent(IN)    :: dt
+
+        if (tau <= 0.0_wp) then
+            H_w = H_w_eq
+        else
+            H_w = H_w + (H_w_eq - H_w) * (1.0_wp - exp(-dt / tau))
+        end if
+
+        return
+
+    end subroutine relax_H_w
 
     ! ------------------------------------------------------------
     ! N-closure post-step for BUCKET mode. Writes hyd%now%N and derives
@@ -318,14 +359,17 @@ contains
                 return
 
             case (N_CLOSURE_OVERBURDEN)
+                !$omp parallel do default(shared) private(i,j) schedule(static)
                 do j = 1, ny
                 do i = 1, nx
                     call hydro_calc_N_overburden(hyd%now%N(i,j), H_ice(i,j), f_ice(i,j), f_grnd(i,j), &
                                                  hyd%par%closures%rho_ice, hyd%par%closures%g)
                 end do
                 end do
+                !$omp end parallel do
 
             case (N_CLOSURE_MARINE)
+                !$omp parallel do default(shared) private(i,j) schedule(static)
                 do j = 1, ny
                 do i = 1, nx
                     call hydro_calc_N_marine(hyd%now%N(i,j), H_ice(i,j), f_ice(i,j), z_bed(i,j), z_sl(i,j), &
@@ -333,8 +377,10 @@ contains
                                              hyd%par%closures%marine%rho_sw, hyd%par%closures%g)
                 end do
                 end do
+                !$omp end parallel do
 
             case (N_CLOSURE_TILL)
+                !$omp parallel do default(shared) private(i,j) schedule(static)
                 do j = 1, ny
                 do i = 1, nx
                     call hydro_calc_N_till(hyd%now%N(i,j), hyd%now%H_w(i,j), H_ice(i,j), &
@@ -344,6 +390,7 @@ contains
                                            hyd%par%closures%rho_ice, hyd%par%closures%g)
                 end do
                 end do
+                !$omp end parallel do
 
             case default
                 write(*,*) "apply_N_closure:: error: unsupported post-step closure ", &
@@ -354,6 +401,7 @@ contains
         end select
 
         ! Derive p_w = Po - N on grounded cells
+        !$omp parallel do default(shared) private(i,j,Po,H_eff) schedule(static)
         do j = 1, ny
         do i = 1, nx
             if (f_grnd(i,j) > 0.0_wp .and. f_ice(i,j) > 0.0_wp) then
@@ -370,17 +418,19 @@ contains
             end if
         end do
         end do
+        !$omp end parallel do
 
         return
 
     end subroutine apply_N_closure
 
-    subroutine hydro_par_load(par, filename, init)
+    subroutine hydro_par_load(par, filename, group, init)
 
         implicit none
 
         type(hydro_param_class), intent(INOUT) :: par
         character(len=*),        intent(IN)    :: filename
+        character(len=*),        intent(IN)    :: group
         logical, optional,       intent(IN)    :: init
 
         logical :: init_pars
@@ -395,22 +445,18 @@ contains
         par%H_w_max        = 2.0_wp
         par%mask_bc      = MASK_BC_ZERO
         par%H_w_bc         = 0.0_wp
-        par%tau_H          = 0.0_wp
-        par%k24_update_H_w = .true.
 
-        call nml_read(filename,"fast_hydrology","method",         par%method,         init=init_pars)
-        call nml_read(filename,"fast_hydrology","init_method",    par%init_method,    init=init_pars)
-        call nml_read(filename,"fast_hydrology","dx",             par%dx,             init=init_pars)
-        call nml_read(filename,"fast_hydrology","dy",             par%dy,             init=init_pars)
-        call nml_read(filename,"fast_hydrology","H_w_max",        par%H_w_max,        init=init_pars)
-        call nml_read(filename,"fast_hydrology","mask_bc",      par%mask_bc,      init=init_pars)
-        call nml_read(filename,"fast_hydrology","H_w_bc",         par%H_w_bc,         init=init_pars)
-        call nml_read(filename,"fast_hydrology","tau_H",          par%tau_H,          init=init_pars)
-        call nml_read(filename,"fast_hydrology","k24_update_H_w", par%k24_update_H_w, init=init_pars)
+        call nml_read(filename,group,"method",         par%method,         init=init_pars)
+        call nml_read(filename,group,"init_method",    par%init_method,    init=init_pars)
+        call nml_read(filename,group,"dx",             par%dx,             init=init_pars)
+        call nml_read(filename,group,"dy",             par%dy,             init=init_pars)
+        call nml_read(filename,group,"H_w_max",        par%H_w_max,        init=init_pars)
+        call nml_read(filename,group,"mask_bc",        par%mask_bc,        init=init_pars)
+        call nml_read(filename,group,"H_w_bc",         par%H_w_bc,         init=init_pars)
 
-        call bucket_par_load (par%bucket,   filename, init=init_pars)
-        call k24_par_load    (par%k24,      filename, init=init_pars)
-        call closure_par_load(par%closures, filename, init=init_pars)
+        call bucket_par_load (par%bucket,   filename, group, init=init_pars)
+        call k24_par_load    (par%k24,      filename, group, init=init_pars)
+        call closure_par_load(par%closures, filename, group, init=init_pars)
 
         return
 

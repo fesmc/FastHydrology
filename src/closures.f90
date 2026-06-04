@@ -61,12 +61,13 @@ module fast_hydrology_closures
 
 contains
 
-    subroutine closure_par_load(par, filename, init)
+    subroutine closure_par_load(par, filename, group, init)
 
         implicit none
 
         type(closure_param_class), intent(INOUT) :: par
         character(len=*),          intent(IN)    :: filename
+        character(len=*),          intent(IN)    :: group
         logical, optional,         intent(IN)    :: init
 
         logical :: init_pars
@@ -84,15 +85,15 @@ contains
         par%till%Cc         =    0.12_wp
         par%two_value%delta =    0.02_wp
 
-        call nml_read(filename,"fast_hydrology_closures","rho_ice",        par%rho_ice,         init=init_pars)
-        call nml_read(filename,"fast_hydrology_closures","g",              par%g,               init=init_pars)
-        call nml_read(filename,"fast_hydrology_closures","marine_p",       par%marine%p,        init=init_pars)
-        call nml_read(filename,"fast_hydrology_closures","marine_rho_sw",  par%marine%rho_sw,   init=init_pars)
-        call nml_read(filename,"fast_hydrology_closures","till_N0",        par%till%N0,         init=init_pars)
-        call nml_read(filename,"fast_hydrology_closures","till_delta",     par%till%delta,      init=init_pars)
-        call nml_read(filename,"fast_hydrology_closures","till_e0",        par%till%e0,         init=init_pars)
-        call nml_read(filename,"fast_hydrology_closures","till_Cc",        par%till%Cc,         init=init_pars)
-        call nml_read(filename,"fast_hydrology_closures","two_value_delta",par%two_value%delta, init=init_pars)
+        call nml_read(filename,group,"rho_ice",        par%rho_ice,         init=init_pars)
+        call nml_read(filename,group,"g",              par%g,               init=init_pars)
+        call nml_read(filename,group,"marine_p",       par%marine%p,        init=init_pars)
+        call nml_read(filename,group,"marine_rho_sw",  par%marine%rho_sw,   init=init_pars)
+        call nml_read(filename,group,"till_N0",        par%till%N0,         init=init_pars)
+        call nml_read(filename,group,"till_delta",     par%till%delta,      init=init_pars)
+        call nml_read(filename,group,"till_e0",        par%till%e0,         init=init_pars)
+        call nml_read(filename,group,"till_Cc",        par%till%Cc,         init=init_pars)
+        call nml_read(filename,group,"two_value_delta",par%two_value%delta, init=init_pars)
 
         return
 

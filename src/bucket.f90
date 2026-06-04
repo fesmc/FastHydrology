@@ -45,12 +45,13 @@ module fast_hydrology_bucket
 
 contains
 
-    subroutine bucket_par_load(par, filename, init)
+    subroutine bucket_par_load(par, filename, group, init)
 
         implicit none
 
         type(bucket_param_class), intent(INOUT) :: par
         character(len=*),         intent(IN)    :: filename
+        character(len=*),         intent(IN)    :: group
         logical, optional,        intent(IN)    :: init
 
         logical :: init_pars
@@ -61,8 +62,8 @@ contains
         par%till_rate = 1.0e-3_wp
         par%N_closure = 0
 
-        call nml_read(filename,"fast_hydrology_bucket","till_rate", par%till_rate, init=init_pars)
-        call nml_read(filename,"fast_hydrology_bucket","N_closure", par%N_closure, init=init_pars)
+        call nml_read(filename,group,"bkt_till_rate", par%till_rate, init=init_pars)
+        call nml_read(filename,group,"bkt_N_closure", par%N_closure, init=init_pars)
 
         return
 
@@ -89,6 +90,7 @@ contains
         nx = size(f_ice,1)
         ny = size(f_ice,2)
 
+        !$omp parallel do default(shared) private(i,j,im1,ip1,jm1,jp1) schedule(static)
         do j = 1, ny
         do i = 1, nx
 
@@ -115,6 +117,7 @@ contains
 
         end do
         end do
+        !$omp end parallel do
 
         return
 
@@ -156,6 +159,7 @@ contains
         nx = size(f_ice,1)
         ny = size(f_ice,2)
 
+        !$omp parallel do default(shared) private(i,j,im1,ip1,jm1,jp1) schedule(static)
         do j = 1, ny
         do i = 1, nx
 
@@ -184,6 +188,7 @@ contains
 
         end do
         end do
+        !$omp end parallel do
 
         return
 

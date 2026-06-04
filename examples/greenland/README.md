@@ -49,4 +49,4 @@ flux magnitude side-by-side for BUCKET and K24.
 - `ATT_bar` is used as `A_glen` (depth-averaged rate factor).
 - The K24 internal mask is `f_grnd > 0 .and. f_ice > 0`.
 - The domain border BC is `MASK_BC_ZERO` by default. Edit
-  `&fast_hydrology { mask_bc }` to switch to IMPOSED or MIRROR.
+  `&fhyd { mask_bc }` to switch to IMPOSED or MIRROR.

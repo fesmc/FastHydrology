@@ -61,12 +61,13 @@ contains
     ! ============================================================
     ! Namelist load
     ! ============================================================
-    subroutine k24_par_load(par, filename, init)
+    subroutine k24_par_load(par, filename, group, init)
 
         implicit none
 
         type(k24_param_class), intent(INOUT) :: par
         character(len=*),      intent(IN)    :: filename
+        character(len=*),      intent(IN)    :: group
         logical, optional,     intent(IN)    :: init
 
         logical :: init_pars
@@ -98,27 +99,27 @@ contains
         par%W_min                         =    1.0e-8_dp
         par%W_max                         =    0.015_dp
 
-        call nml_read(filename,"fast_hydrology_k24","substrate_type",                par%substrate_type,                init=init_pars)
-        call nml_read(filename,"fast_hydrology_k24","flux_solver",                   par%flux_solver,                   init=init_pars)
-        call nml_read(filename,"fast_hydrology_k24","water_density",                 par%water_density,                 init=init_pars)
-        call nml_read(filename,"fast_hydrology_k24","ice_density",                   par%ice_density,                   init=init_pars)
-        call nml_read(filename,"fast_hydrology_k24","gravity",                       par%gravity,                       init=init_pars)
-        call nml_read(filename,"fast_hydrology_k24","manning_exponent",              par%manning_exponent,              init=init_pars)
-        call nml_read(filename,"fast_hydrology_k24","latent_heat_water",             par%latent_heat_water,             init=init_pars)
-        call nml_read(filename,"fast_hydrology_k24","bed_thickness",                 par%bed_thickness,                 init=init_pars)
-        call nml_read(filename,"fast_hydrology_k24","manning_coefficient_exponent",  par%manning_coefficient_exponent,  init=init_pars)
-        call nml_read(filename,"fast_hydrology_k24","bed_friction_exponent",         par%bed_friction_exponent,         init=init_pars)
-        call nml_read(filename,"fast_hydrology_k24","friction_factor",               par%friction_factor,               init=init_pars)
-        call nml_read(filename,"fast_hydrology_k24","till_factor",                   par%till_factor,                   init=init_pars)
-        call nml_read(filename,"fast_hydrology_k24","critical_discharge",            par%critical_discharge,            init=init_pars)
-        call nml_read(filename,"fast_hydrology_k24","initial_cavity_height",         par%initial_cavity_height,         init=init_pars)
-        call nml_read(filename,"fast_hydrology_k24","coupling_length",               par%coupling_length,               init=init_pars)
-        call nml_read(filename,"fast_hydrology_k24","long_coupling_water",           par%long_coupling_water,           init=init_pars)
-        call nml_read(filename,"fast_hydrology_k24","seconds_per_year",              par%seconds_per_year,              init=init_pars)
-        call nml_read(filename,"fast_hydrology_k24","min_pressure_fraction",         par%min_pressure_fraction,         init=init_pars)
-        call nml_read(filename,"fast_hydrology_k24","eta_w",                         par%eta_w,                         init=init_pars)
-        call nml_read(filename,"fast_hydrology_k24","W_min",                         par%W_min,                         init=init_pars)
-        call nml_read(filename,"fast_hydrology_k24","W_max",                         par%W_max,                         init=init_pars)
+        call nml_read(filename,group,"k24_substrate_type",                par%substrate_type,                init=init_pars)
+        call nml_read(filename,group,"k24_flux_solver",                   par%flux_solver,                   init=init_pars)
+        call nml_read(filename,group,"k24_water_density",                 par%water_density,                 init=init_pars)
+        call nml_read(filename,group,"k24_ice_density",                   par%ice_density,                   init=init_pars)
+        call nml_read(filename,group,"k24_gravity",                       par%gravity,                       init=init_pars)
+        call nml_read(filename,group,"k24_manning_exponent",              par%manning_exponent,              init=init_pars)
+        call nml_read(filename,group,"k24_latent_heat_water",             par%latent_heat_water,             init=init_pars)
+        call nml_read(filename,group,"k24_bed_thickness",                 par%bed_thickness,                 init=init_pars)
+        call nml_read(filename,group,"k24_manning_coefficient_exponent",  par%manning_coefficient_exponent,  init=init_pars)
+        call nml_read(filename,group,"k24_bed_friction_exponent",         par%bed_friction_exponent,         init=init_pars)
+        call nml_read(filename,group,"k24_friction_factor",               par%friction_factor,               init=init_pars)
+        call nml_read(filename,group,"k24_till_factor",                   par%till_factor,                   init=init_pars)
+        call nml_read(filename,group,"k24_critical_discharge",            par%critical_discharge,            init=init_pars)
+        call nml_read(filename,group,"k24_initial_cavity_height",         par%initial_cavity_height,         init=init_pars)
+        call nml_read(filename,group,"k24_coupling_length",               par%coupling_length,               init=init_pars)
+        call nml_read(filename,group,"k24_long_coupling_water",           par%long_coupling_water,           init=init_pars)
+        call nml_read(filename,group,"k24_seconds_per_year",              par%seconds_per_year,              init=init_pars)
+        call nml_read(filename,group,"k24_min_pressure_fraction",         par%min_pressure_fraction,         init=init_pars)
+        call nml_read(filename,group,"k24_eta_w",                         par%eta_w,                         init=init_pars)
+        call nml_read(filename,group,"k24_W_min",                         par%W_min,                         init=init_pars)
+        call nml_read(filename,group,"k24_W_max",                         par%W_max,                         init=init_pars)
 
         return
 
@@ -146,6 +147,7 @@ contains
             case (K24_SUBSTRATE_SOFT)
                 kappa = 1.0_dp
             case (K24_SUBSTRATE_MIXED)
+                !$omp parallel do default(shared) private(i,j) schedule(static)
                 do j = 1, ny
                     do i = 1, nx
                         if (b(i,j) < -1000.0_dp) then
@@ -155,6 +157,7 @@ contains
                         end if
                     end do
                 end do
+                !$omp end parallel do
             case default
                 write(*,*) "initialize_kappa:: error: substrate_type must be one of [0,1,2]."
                 write(*,*) "substrate_type = ", substrate_type
@@ -230,12 +233,14 @@ contains
         call potential_filling(phi_0, 10)
 
         ! Recover h consistent with filled potential (matches original program)
+        !$omp parallel do default(shared) private(i,j) schedule(static)
         do j = 1, ny
             do i = 1, nx
                 h_for_pot(i,j) = (phi_0(i,j) - par%water_density * par%gravity * z_bed(i,j)) &
                                 / (par%ice_density * par%gravity)
             end do
         end do
+        !$omp end parallel do
 
         call update_potential_gradients_smoothed(minus_grad_phi_x, minus_grad_phi_y, abs_grad_phi, &
                                                  phi_0, h_for_pot, dx, mask, par)
@@ -245,6 +250,7 @@ contains
                             par%flux_solver)
 
         ! Coordinate-system correction
+        !$omp parallel do default(shared) private(i,j) schedule(static)
         do j = 1, ny
             do i = 1, nx
                 corfac(i,j) = sqrt(minus_grad_phi_x(i,j)**2 + minus_grad_phi_y(i,j)**2)
@@ -255,13 +261,16 @@ contains
                 end if
             end do
         end do
+        !$omp end parallel do
 
+        !$omp parallel do default(shared) private(i,j) schedule(static)
         do j = 1, ny
             do i = 1, nx
                 q_flux(i,j) = psi_out(i,j) / (corfac(i,j) * dx)
                 q_flux(i,j) = min(max(q_flux(i,j), 0.0_dp), 1.0e5_dp)
             end do
         end do
+        !$omp end parallel do
 
         ! ========== Sheet water-layer thickness (Kazmierczak 2022 Eq. 8) ==========
         !   W = (12 * eta_w * q_si / mean(|grad phi_0_smoothed|))^(1/3),
@@ -271,40 +280,50 @@ contains
 
         ! ========== Effective pressure ==========
         ! Recompute potential and unsmoothed gradients (matches original program)
+        !$omp parallel do default(shared) private(i,j) schedule(static)
         do j = 1, ny
             do i = 1, nx
                 phi_0(i,j) = par%ice_density * par%gravity * h_for_pot(i,j) &
                            + par%water_density * par%gravity * z_bed(i,j)
             end do
         end do
+        !$omp end parallel do
 
+        !$omp parallel do default(shared) private(i,j) schedule(static)
         do j = 1, ny
             do i = 2, nx-1
                 minus_grad_phi_x(i,j) = -(phi_0(i+1,j) - phi_0(i-1,j)) / (2.0_dp * dx)
             end do
         end do
+        !$omp end parallel do
         minus_grad_phi_x(1,:)  = minus_grad_phi_x(2,:)
         minus_grad_phi_x(nx,:) = minus_grad_phi_x(nx-1,:)
 
+        !$omp parallel do default(shared) private(i,j) schedule(static)
         do j = 2, ny-1
             do i = 1, nx
                 minus_grad_phi_y(i,j) = -(phi_0(i,j+1) - phi_0(i,j-1)) / (2.0_dp * dx)
             end do
         end do
+        !$omp end parallel do
         minus_grad_phi_y(:,1)  = minus_grad_phi_y(:,2)
         minus_grad_phi_y(:,ny) = minus_grad_phi_y(:,ny-1)
 
+        !$omp parallel do default(shared) private(i,j) schedule(static)
         do j = 1, ny
             do i = 1, nx
                 abs_grad_phi(i,j) = sqrt(minus_grad_phi_x(i,j)**2 + minus_grad_phi_y(i,j)**2)
             end do
         end do
+        !$omp end parallel do
 
+        !$omp parallel do default(shared) private(i,j) schedule(static)
         do j = 1, ny
             do i = 1, nx
                 Q_disc(i,j) = q_flux(i,j) * par%coupling_length
             end do
         end do
+        !$omp end parallel do
 
         call update_S_inf(S_inf, K, par%manning_coefficient_exponent, par%bed_friction_exponent, &
                           abs_grad_phi, Q_disc)
@@ -320,6 +339,7 @@ contains
         ! Output components: signed flux from gradient direction.
         ! q_flux is the magnitude; allocate to (q_x, q_y) by the unit gradient
         ! components. Where abs_grad_phi vanishes, distribute zero.
+        !$omp parallel do default(shared) private(i,j) schedule(static)
         do j = 1, ny
             do i = 1, nx
                 if (abs_grad_phi(i,j) > 1.0e-12_dp) then
@@ -333,6 +353,7 @@ contains
                 ! H_w already populated by compute_W_into above.
             end do
         end do
+        !$omp end parallel do
 
         deallocate(phi_0, minus_grad_phi_x, minus_grad_phi_y, abs_grad_phi)
         deallocate(psi_out, q_flux, Q_disc)
@@ -354,12 +375,14 @@ contains
         integer :: i, j, nx, ny
 
         nx = size(phi_0,1); ny = size(phi_0,2)
+        !$omp parallel do default(shared) private(i,j) schedule(static)
         do j = 1, ny
             do i = 1, nx
                 phi_0(i,j) = par%ice_density * par%gravity * h(i,j) &
                            + par%water_density * par%gravity * b(i,j)
             end do
         end do
+        !$omp end parallel do
     end subroutine update_potential
 
     ! ============================================================
@@ -380,6 +403,7 @@ contains
 
         do iter = 1, iterations
             pot_next = phi_0
+            !$omp parallel do default(shared) private(i,j,p,p_mean,all_greater) schedule(static)
             do j = 2, ny-1
                 do i = 2, nx-1
                     p = phi_0(i,j)
@@ -392,6 +416,7 @@ contains
                     end if
                 end do
             end do
+            !$omp end parallel do
             phi_0 = pot_next
         end do
 
@@ -415,29 +440,35 @@ contains
         nx = size(phi_0,1); ny = size(phi_0,2)
 
         ! Unsmoothed gradients
+        !$omp parallel do default(shared) private(i,j) schedule(static)
         do j = 1, ny
             do i = 2, nx-1
                 minus_grad_phi_x(i,j) = -(phi_0(i+1,j) - phi_0(i-1,j)) / (2.0_dp * dx)
             end do
         end do
+        !$omp end parallel do
         minus_grad_phi_x(1,:)  = minus_grad_phi_x(2,:)
         minus_grad_phi_x(nx,:) = minus_grad_phi_x(nx-1,:)
 
+        !$omp parallel do default(shared) private(i,j) schedule(static)
         do j = 2, ny-1
             do i = 1, nx
                 minus_grad_phi_y(i,j) = -(phi_0(i,j+1) - phi_0(i,j-1)) / (2.0_dp * dx)
             end do
         end do
+        !$omp end parallel do
         minus_grad_phi_y(:,1)  = minus_grad_phi_y(:,2)
         minus_grad_phi_y(:,ny) = minus_grad_phi_y(:,ny-1)
 
         ! Kernel scale from mean active ice thickness
         h_avg = 0.0_dp
+        !$omp parallel do default(shared) private(i,j) reduction(+:h_avg) schedule(static)
         do j = 1, ny
             do i = 1, nx
                 if (mask(i,j) == 1.0_dp) h_avg = h_avg + h(i,j)
             end do
         end do
+        !$omp end parallel do
         h_avg = h_avg / max(1, count(mask == 1.0_dp))
         h_avg = max(h_avg, 10.0_dp)
 
@@ -472,11 +503,13 @@ contains
         call imfilter_reflect_fftw(tx, nx, ny, kernel, kernel_size, frb, minus_grad_phi_x)
         call imfilter_reflect_fftw(ty, nx, ny, kernel, kernel_size, frb, minus_grad_phi_y)
 
+        !$omp parallel do default(shared) private(i,j) schedule(static)
         do j = 1, ny
             do i = 1, nx
                 abs_grad_phi(i,j) = abs(minus_grad_phi_x(i,j)) + abs(minus_grad_phi_y(i,j))
             end do
         end do
+        !$omp end parallel do
 
         deallocate(kernel, tx, ty)
     end subroutine update_potential_gradients_smoothed
@@ -514,6 +547,7 @@ contains
         work_a = 0.0_dp
         work_b = 0.0_dp
 
+        !$omp parallel do default(shared) private(i,j,ii,jj) schedule(static)
         do j = 1, Npy
             do i = 1, Npx
                 ii = i - frb;  jj = j - frb
@@ -524,6 +558,7 @@ contains
                 work_a(i, j) = input(ii, jj)
             end do
         end do
+        !$omp end parallel do
 
         do nj = 1, kernel_size
             do ni = 1, kernel_size
@@ -549,11 +584,13 @@ contains
 
         work_out = work_out / real(Mfft * Nfft, dp)
 
+        !$omp parallel do default(shared) private(i,j) schedule(static)
         do j = 1, ny
             do i = 1, nx
                 output(i, j) = work_out(i + 2*frb, j + 2*frb)
             end do
         end do
+        !$omp end parallel do
 
         deallocate(work_a, work_b, work_out, A_hat, B_hat)
     end subroutine imfilter_reflect_fftw
@@ -723,6 +760,7 @@ contains
         ! (0) so they cannot contribute spurious flux upstream from
         ! uninitialized memory. mask=1 cells seed with the local melt source.
         psi_out = 0.0_dp
+        !$omp parallel do default(shared) private(i,j) schedule(static)
         do j = 1, ny
             do i = 1, nx
                 if (mask(i,j) == 1.0_dp) then
@@ -730,10 +768,12 @@ contains
                 end if
             end do
         end do
+        !$omp end parallel do
 
         ! Count in-edges: for cell c, count how many neighbours n send flow
         ! into c. Mirrors the recursive iteration over directions (the inner
         ! loop computes contributions from neighbours of the current cell).
+        !$omp parallel do default(shared) private(i,j,dir_idx,ni,nj,abs_grad,w) schedule(static)
         do j = 1, ny
             do i = 1, nx
                 if (mask(i,j) /= 1.0_dp) cycle
@@ -752,6 +792,7 @@ contains
                 end do
             end do
         end do
+        !$omp end parallel do
 
         ! Queue is at most one slot per active cell.
         qsize = count(mask == 1.0_dp)
@@ -827,11 +868,13 @@ contains
         real(dp), intent(IN)  :: rho_i, g, h(:,:)
         integer :: i, j, nx, ny
         nx = size(Po,1); ny = size(Po,2)
+        !$omp parallel do default(shared) private(i,j) schedule(static)
         do j = 1, ny
             do i = 1, nx
                 Po(i,j) = max(rho_i * g * h(i,j), 1.0e5_dp)
             end do
         end do
+        !$omp end parallel do
     end subroutine update_Po
 
     subroutine compute_W_into(W, q_flux, abs_grad_phi_s, mask, eta_w, W_min, W_max, sec_per_year)
@@ -857,6 +900,7 @@ contains
         ! Mean of smoothed |grad phi| over mask==1 cells
         g_mean   = 0.0_dp
         n_active = 0
+        !$omp parallel do default(shared) private(i,j) reduction(+:g_mean,n_active) schedule(static)
         do j = 1, ny
             do i = 1, nx
                 if (mask(i,j) == 1.0_dp) then
@@ -865,9 +909,11 @@ contains
                 end if
             end do
         end do
+        !$omp end parallel do
         if (n_active > 0) g_mean = g_mean / real(n_active, dp)
         g_mean = max(g_mean, 1.0e-12_dp)
 
+        !$omp parallel do default(shared) private(i,j,q_si,num) schedule(static)
         do j = 1, ny
             do i = 1, nx
                 q_si    = q_flux(i,j) / sec_per_year
@@ -875,6 +921,7 @@ contains
                 W(i,j)  = max(W_min, min(W_max, num**(1.0_dp/3.0_dp)))
             end do
         end do
+        !$omp end parallel do
 
     end subroutine compute_W_into
 
@@ -885,6 +932,7 @@ contains
         real(dp), intent(IN)  :: abs_grad_phi(:,:), Q(:,:)
         integer :: i, j, nx, ny
         nx = size(S_inf,1); ny = size(S_inf,2)
+        !$omp parallel do default(shared) private(i,j) schedule(static)
         do j = 1, ny
             do i = 1, nx
                 S_inf(i,j) = (K**(-1.0_dp / alpha)) * &
@@ -893,6 +941,7 @@ contains
                 S_inf(i,j) = max(S_inf(i,j), 1.0e-12_dp)
             end do
         end do
+        !$omp end parallel do
     end subroutine update_S_inf
 
     subroutine update_H_conduit(H_conduit, H_hard, H_soft, S_inf, H_0, F_till, Q, Q_c, kappa)
@@ -902,6 +951,7 @@ contains
         real(dp), intent(IN)  :: Q(:,:), Q_c, kappa(:,:)
         integer :: i, j, nx, ny
         nx = size(H_conduit,1); ny = size(H_conduit,2)
+        !$omp parallel do default(shared) private(i,j) schedule(static)
         do j = 1, ny
             do i = 1, nx
                 H_hard(i,j) = sqrt(S_inf(i,j))
@@ -912,6 +962,7 @@ contains
                 H_conduit(i,j) = max(H_conduit(i,j), 1.0e-12_dp)
             end do
         end do
+        !$omp end parallel do
     end subroutine update_H_conduit
 
     subroutine update_N_inf(N_inf, H_conduit, S_inf, rho_i, L_w, abs_v_b, h_b, Q, &
@@ -925,6 +976,7 @@ contains
         real(dp) :: numerator, denominator, cavity_ratio
         integer :: i, j, nx, ny
         nx = size(N_inf,1); ny = size(N_inf,2)
+        !$omp parallel do default(shared) private(i,j,numerator,denominator,cavity_ratio) schedule(static)
         do j = 1, ny
             do i = 1, nx
                 numerator   = rho_i * L_w * abs_v_b(i,j) * h_b + Q(i,j) * abs_grad_phi(i,j)
@@ -935,6 +987,7 @@ contains
                                  min_pressure_fraction * Po(i,j))
             end do
         end do
+        !$omp end parallel do
     end subroutine update_N_inf
 
     subroutine update_N(N, N_inf, phi_0)
@@ -943,12 +996,14 @@ contains
         real(dp), intent(IN)  :: N_inf(:,:), phi_0(:,:)
         integer :: i, j, nx, ny
         nx = size(N,1); ny = size(N,2)
+        !$omp parallel do default(shared) private(i,j) schedule(static)
         do j = 1, ny
             do i = 1, nx
                 N(i,j) = max(0.0_dp, erf(sqrt(3.14159265358979323846_dp) * phi_0(i,j) / &
                                          (2.0_dp * N_inf(i,j))) * N_inf(i,j))
             end do
         end do
+        !$omp end parallel do
     end subroutine update_N
 
 end module fast_hydrology_k24
