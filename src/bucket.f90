@@ -8,12 +8,13 @@ module fast_hydrology_bucket
     !
     ! Notation follows van Pelt & Bueler 2015 (BvP15): W_til is the till
     ! water storage layer thickness (m); bkt_till_rate is a constant
-    ! background drainage to a deeper unspecified substrate (m/a in the
-    ! namelist; converted to m/s internally -- see fast_hydrology). The
+    ! background drainage to a deeper unspecified substrate (read from the
+    ! namelist in m/a, converted to m/s inside bucket_par_load). The
     ! distributed sheet thickness W (between till and ice) is produced by
     ! the transport model (K24), not this bucket.
     !
-    ! Cell logic (within host mask == 1):
+    ! Cell logic (within host mask == 1; dt in seconds, mdot and till_rate
+    ! in m/s, W_til in m):
     !   f_grnd > 0 .and. f_ice > 0 :
     !       W_attempt = W_til + dt * (mdot - till_rate)
     !       W_til     = clamp(W_attempt, 0, W_til_max(i,j))
@@ -22,9 +23,8 @@ module fast_hydrology_bucket
     !       W_til    = 0
     !       overflow = 0
     !
-    ! `overflow` is the till-saturation overflow rate (units: same as mdot;
-    ! see fast_hydrology for the m/s convention). It is the source term the
-    ! transport model (K24) consumes.
+    ! `overflow` (m/s) is the till-saturation overflow rate -- the source
+    ! term the transport model (K24) consumes.
     !
     ! Host-supplied `mask` is intersected with these cases: where mask /= 1
     ! the cell is left untouched (host has decided it is outside the active
@@ -38,6 +38,11 @@ module fast_hydrology_bucket
     integer, parameter :: sp = kind(1.0)
     integer, parameter :: wp = sp
 
+    ! Seconds per year used for namelist unit conversion. Match the value
+    ! used in fast_hydrology (kept in two places to avoid the cross-module
+    ! coupling for a single literal).
+    real(wp), parameter :: SEC_PER_YEAR = 3.1556926e7_wp
+
     ! ---------- Domain-border BC enum (par%mask_bc) ----------
     ! Controls how W_til is treated on the outer halo of the domain (the
     ! i=1, i=nx, j=1, j=ny rim of cells). Floating-cell logic is independent
@@ -47,7 +52,7 @@ module fast_hydrology_bucket
     integer, parameter, public :: MASK_BC_MIRROR  = 2  ! W_til mirrored from the inward neighbor (Neumann)
 
     type bucket_param_class
-        real(wp) :: till_rate          ! background till drainage [units: same as mdot]
+        real(wp) :: till_rate          ! background till drainage [m/s] (namelist value is m/a)
         integer  :: N_closure          ! see fast_hydrology_closures::N_CLOSURE_*
     end type
 
@@ -74,11 +79,15 @@ contains
         init_pars = .FALSE.
         if (present(init)) init_pars = init
 
+        ! Defaults in namelist units (m/a) for till_rate.
         par%till_rate = 1.0e-3_wp
         par%N_closure = 0
 
         call nml_read(filename,group,"bkt_till_rate", par%till_rate, init=init_pars)
         call nml_read(filename,group,"bkt_N_closure", par%N_closure, init=init_pars)
+
+        ! Convert till_rate from namelist units (m/a) to internal SI (m/s).
+        par%till_rate = par%till_rate / SEC_PER_YEAR
 
         return
 

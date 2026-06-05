@@ -67,12 +67,12 @@ program greenland
     call nc_read(restart_file, "ATT_bar",  A_glen,   start=[1,1,1], count=[nx,ny,1])
     call nc_read(restart_file, "bmb_grnd", bmb_grnd, start=[1,1,1], count=[nx,ny,1])
 
-    ! Convert bmb_grnd (ice-equivalent, sign convention: positive = melt) to
-    ! a water-equivalent source rate (m/a) for the library:
-    !   mdot = -bmb_grnd * (rho_ice / rho_w).
+    ! Convert bmb_grnd (ice-equivalent m/a, sign convention: positive =
+    ! accumulation) to a water-equivalent source rate (m/s, SI) for the
+    ! library:
+    !   mdot = -bmb_grnd * (rho_ice / rho_w) / SEC_PER_YEAR.
     ! Yelmo's sign convention has bmb_grnd negative when melting; flip it.
-    ! (Units stay m/a until Commit 2 switches the internals to SI.)
-    mdot = -bmb_grnd * (917.0_wp_local / 1000.0_wp_local)
+    mdot = -bmb_grnd * (917.0_wp_local / 1000.0_wp_local) / SEC_PER_YEAR
 
     ! Build mask: K24 / BUCKET active where grounded ice exists.
     where (f_grnd > 0.0_wp_local .and. f_ice > 0.0_wp_local)
@@ -96,7 +96,7 @@ program greenland
     write(*,'(a,i0,a)') "  method_transport = ", hyd%par%method_transport, " (0=NONE 1=K24)"
     write(*,'(a,i0)')   "  N_clos           = ", hyd%par%bucket%N_closure
     write(*,'(a,i0)')   "  mask_bc          = ", hyd%par%mask_bc
-    write(*,'(a,es12.3,a)') "  mdot_max         = ", maxval(mdot), " m/a (water equiv.)"
+    write(*,'(a,es12.3,a)') "  mdot_max         = ", maxval(mdot), " m/s (water equiv.)"
 
     ! ---- Output ----
     call output_init(out_file, xc, yc)
@@ -169,9 +169,9 @@ contains
         call nc_write(filename, "W_til",    hyd%now%W_til,      dim1="xc", dim2="yc", dim3="time", &
                       start=[1,1,n], units="m",     long_name="Till water storage thickness (bucket)")
         call nc_write(filename, "dW_til_dt",hyd%now%dW_til_dt,  dim1="xc", dim2="yc", dim3="time", &
-                      start=[1,1,n], units="m a-1", long_name="Rate of change of W_til")
+                      start=[1,1,n], units="m s-1", long_name="Rate of change of W_til")
         call nc_write(filename, "overflow", hyd%now%overflow,   dim1="xc", dim2="yc", dim3="time", &
-                      start=[1,1,n], units="m a-1", long_name="Till-saturation overflow rate (bucket -> transport)")
+                      start=[1,1,n], units="m s-1", long_name="Till-saturation overflow rate (bucket -> transport)")
         call nc_write(filename, "W",        hyd%now%W,          dim1="xc", dim2="yc", dim3="time", &
                       start=[1,1,n], units="m",     long_name="Distributed sheet water-layer thickness (K24)")
         call nc_write(filename, "N",        hyd%now%N,          dim1="xc", dim2="yc", dim3="time", &

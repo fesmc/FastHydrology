@@ -23,7 +23,13 @@ transport. Notation follows van Pelt & Bueler 2015:
 
 - `W_til` : till water storage thickness   [m]
 - `W`     : distributed sheet thickness    [m]
-- `mdot`  : source rate from ice base      [m/a today; m/s after Commit 2]
+- `mdot`  : source rate from ice base      [m/s, water-equivalent]
+
+All internal units are SI. The public API takes `time` in years (matching
+typical ice-sheet model conventions); namelist `bkt_till_rate` is in m/a
+(converted at load time). Output diagnostics (`dW_til_dt`, `overflow`,
+`q_x`, `q_y`) are in SI. The grid spacing pair `(dx, dy)` is carried
+throughout — no isotropic-grid assumption.
 
 ## Build
 

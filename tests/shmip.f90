@@ -20,7 +20,7 @@ program shmip
     integer, parameter :: wp_local = kind(1.0)
     integer, parameter :: dp = kind(1.d0)
 
-    real(wp_local), parameter :: SEC_PER_YEAR = 31536000.0_wp_local
+    ! SEC_PER_YEAR is exported by fast_hydrology; no local copy needed.
     real(wp_local), parameter :: PI           = 4.0_wp_local * atan(1.0_wp_local)
     integer, parameter        :: N_MOULIN     = 10
 
@@ -188,7 +188,7 @@ contains
     end subroutine setup_case
 
     subroutine update_forcing(cs, time, mdot)
-        ! Fill mdot (m/a, water-equivalent) from the case state at the
+        ! Fill mdot (m/s, water-equivalent) from the case state at the
         ! given time. Distributed background scaled per case; moulin
         ! contributions added as point sources.
 
@@ -214,12 +214,13 @@ contains
             m_s = cs%m_s_background
         end if
 
-        mdot = m_s * SEC_PER_YEAR
+        mdot = m_s   ! [m/s] water-equivalent, SI
 
-        ! Moulin point sources
+        ! Moulin point sources: Q_moulin_total [m3/s] spread over N_MOULIN
+        ! cells as a depth-rate q_per_cell [m/s] = Q / N / area.
         if (cs%has_moulins) then
             Q          = cs%Q_moulin_total
-            q_per_cell = Q / real(N_MOULIN, wp_local) / (cs%dx * cs%dy) * SEC_PER_YEAR
+            q_per_cell = Q / real(N_MOULIN, wp_local) / (cs%dx * cs%dy)
             do k = 1, N_MOULIN
                 i = cs%ix_moulin(k)
                 j = cs%jy_moulin(k)
@@ -336,9 +337,9 @@ contains
         call nc_write(filename, "W_til",    hyd%now%W_til,      dim1="xc", dim2="yc", dim3="time", &
                       start=[1,1,n], units="m",     long_name="Till water storage thickness")
         call nc_write(filename, "dW_til_dt",hyd%now%dW_til_dt,  dim1="xc", dim2="yc", dim3="time", &
-                      start=[1,1,n], units="m a-1", long_name="Rate of change of W_til")
+                      start=[1,1,n], units="m s-1", long_name="Rate of change of W_til")
         call nc_write(filename, "overflow", hyd%now%overflow,   dim1="xc", dim2="yc", dim3="time", &
-                      start=[1,1,n], units="m a-1", long_name="Till-saturation overflow rate")
+                      start=[1,1,n], units="m s-1", long_name="Till-saturation overflow rate")
         call nc_write(filename, "W",        hyd%now%W,          dim1="xc", dim2="yc", dim3="time", &
                       start=[1,1,n], units="m",     long_name="Distributed sheet water-layer thickness (K24)")
         call nc_write(filename, "N",        hyd%now%N,          dim1="xc", dim2="yc", dim3="time", &

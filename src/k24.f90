@@ -39,7 +39,6 @@ module fast_hydrology_k24
         real(dp) :: initial_cavity_height
         real(dp) :: coupling_length
         real(dp) :: long_coupling_water
-        real(dp) :: seconds_per_year
         real(dp) :: min_pressure_fraction
         ! W = (12 * eta_w * q / mean(|grad phi_0_smoothed|))^(1/3), clamped to
         ! [Wmin, Wmax]. See Kazmierczak et al 2022 Eq. (8), update_W! in the
@@ -95,7 +94,6 @@ contains
         par%initial_cavity_height         =    0.1_dp
         par%coupling_length               =    1.0e4_dp
         par%long_coupling_water           =    5.0_dp
-        par%seconds_per_year              =    3.154e7_dp
         par%min_pressure_fraction         =    0.02_dp
         par%eta_w                         =    1.8e-3_dp
         par%W_min                         =    1.0e-8_dp
@@ -117,7 +115,6 @@ contains
         call nml_read(filename,group,"k24_initial_cavity_height",         par%initial_cavity_height,         init=init_pars)
         call nml_read(filename,group,"k24_coupling_length",               par%coupling_length,               init=init_pars)
         call nml_read(filename,group,"k24_long_coupling_water",           par%long_coupling_water,           init=init_pars)
-        call nml_read(filename,group,"k24_seconds_per_year",              par%seconds_per_year,              init=init_pars)
         call nml_read(filename,group,"k24_min_pressure_fraction",         par%min_pressure_fraction,         init=init_pars)
         call nml_read(filename,group,"k24_eta_w",                         par%eta_w,                         init=init_pars)
         call nml_read(filename,group,"k24_W_min",                         par%W_min,                         init=init_pars)
@@ -175,7 +172,7 @@ contains
     ! ============================================================
     subroutine calc_k24(q_x, q_y, N, p_w, W, &
                        H_ice, z_bed, mask, mdot, uxy_b, A_glen, kappa, &
-                       dx, par)
+                       dx, dy, par)
 
         ! W is the distributed sheet water-layer thickness between till
         ! and ice base, per Kazmierczak et al 2022 Eq. (8):
@@ -198,16 +195,16 @@ contains
         real(dp), intent(IN)  :: H_ice(:,:)
         real(dp), intent(IN)  :: z_bed(:,:)
         real(dp), intent(IN)  :: mask(:,:)
-        real(dp), intent(IN)  :: mdot(:,:)              ! source rate (water-equiv. m/a today; m/s after Commit 2)
-        real(dp), intent(IN)  :: uxy_b(:,:)             ! basal sliding speed magnitude
+        real(dp), intent(IN)  :: mdot(:,:)              ! source rate [m/s, water-equiv.]
+        real(dp), intent(IN)  :: uxy_b(:,:)             ! basal sliding speed magnitude [m/s]
         real(dp), intent(IN)  :: A_glen(:,:)
         real(dp), intent(IN)  :: kappa(:,:)
-        real(dp), intent(IN)  :: dx
+        real(dp), intent(IN)  :: dx, dy                 ! [m] grid spacing
         type(k24_param_class), intent(IN) :: par
 
         ! Locals (K24 internals — all scoped to this call)
         integer :: nx, ny, i, j
-        real(dp) :: K, dx_sq
+        real(dp) :: K, cell_area, q_width
         real(dp), allocatable :: phi_0(:,:)
         real(dp), allocatable :: minus_grad_phi_x(:,:), minus_grad_phi_y(:,:)
         real(dp), allocatable :: abs_grad_phi(:,:)
@@ -218,7 +215,13 @@ contains
 
         nx = size(H_ice,1)
         ny = size(H_ice,2)
-        dx_sq = dx*dx
+        cell_area = dx*dy
+        ! TODO: q_flux = psi_out / (corfac * q_width) uses sqrt(dx*dy) as a
+        ! placeholder for the per-width perpendicular to the flow direction.
+        ! For rectangular grids the correct value depends on the flow vector;
+        ! projecting onto axes is the next refinement. For dx == dy this is
+        ! exact.
+        q_width = sqrt(dx*dy)
 
         allocate(phi_0(nx,ny))
         allocate(minus_grad_phi_x(nx,ny), minus_grad_phi_y(nx,ny), abs_grad_phi(nx,ny))
@@ -231,10 +234,8 @@ contains
         K = (2.0_dp / 3.14159265358979323846_dp)**0.25_dp * &
             sqrt((3.14159265358979323846_dp + 2.0_dp) / (par%water_density * par%friction_factor))
 
-        ! Caller passes source rate; K24 uses m_dot in the same unit space.
-        ! Today: m/a water-equivalent (matches original program). After
-        ! Commit 2: m/s SI; the s_per_yr scaling inside compute_W_into
-        ! retires accordingly.
+        ! Caller passes source rate in m/s (water-equivalent). All K24
+        ! internals operate in SI.
         m_dot = mdot
 
         ! ========== Distributed water flux ==========
@@ -253,9 +254,9 @@ contains
         !$omp end parallel do
 
         call update_potential_gradients_smoothed(minus_grad_phi_x, minus_grad_phi_y, abs_grad_phi, &
-                                                 phi_0, h_for_pot, dx, mask, par)
+                                                 phi_0, h_for_pot, dx, dy, mask, par)
 
-        call update_psi_out(psi_out, m_dot, dx_sq, &
+        call update_psi_out(psi_out, m_dot, cell_area, &
                             minus_grad_phi_x, minus_grad_phi_y, abs_grad_phi, mask, &
                             par%flux_solver)
 
@@ -276,17 +277,17 @@ contains
         !$omp parallel do default(shared) private(i,j) schedule(static)
         do j = 1, ny
             do i = 1, nx
-                q_flux(i,j) = psi_out(i,j) / (corfac(i,j) * dx)
+                q_flux(i,j) = psi_out(i,j) / (corfac(i,j) * q_width)
                 q_flux(i,j) = min(max(q_flux(i,j), 0.0_dp), 1.0e5_dp)
             end do
         end do
         !$omp end parallel do
 
         ! ========== Sheet water-layer thickness (Kazmierczak 2022 Eq. 8) ==========
-        !   W = (12 * eta_w * q_si / mean(|grad phi_0_smoothed|))^(1/3),
-        !   clamped to [W_min, W_max]. q_si = q_flux / seconds_per_year (m2/s).
+        !   W = (12 * eta_w * q / mean(|grad phi_0_smoothed|))^(1/3),
+        !   clamped to [W_min, W_max]. q_flux is already in m2/s.
         call compute_W_into(W, q_flux, abs_grad_phi, mask, &
-                            par%eta_w, par%W_min, par%W_max, par%seconds_per_year)
+                            par%eta_w, par%W_min, par%W_max)
 
         ! ========== Effective pressure ==========
         ! Recompute potential and unsmoothed gradients (matches original program)
@@ -312,7 +313,7 @@ contains
         !$omp parallel do default(shared) private(i,j) schedule(static)
         do j = 2, ny-1
             do i = 1, nx
-                minus_grad_phi_y(i,j) = -(phi_0(i,j+1) - phi_0(i,j-1)) / (2.0_dp * dx)
+                minus_grad_phi_y(i,j) = -(phi_0(i,j+1) - phi_0(i,j-1)) / (2.0_dp * dy)
             end do
         end do
         !$omp end parallel do
@@ -437,14 +438,14 @@ contains
     ! FFT-smoothed gradient field
     ! ============================================================
     subroutine update_potential_gradients_smoothed(minus_grad_phi_x, minus_grad_phi_y, &
-                                                   abs_grad_phi, phi_0, h, dx, mask, par)
+                                                   abs_grad_phi, phi_0, h, dx, dy, mask, par)
         implicit none
         real(dp), intent(OUT) :: minus_grad_phi_x(:,:), minus_grad_phi_y(:,:), abs_grad_phi(:,:)
-        real(dp), intent(IN)  :: phi_0(:,:), h(:,:), mask(:,:), dx
+        real(dp), intent(IN)  :: phi_0(:,:), h(:,:), mask(:,:), dx, dy
         type(k24_param_class), intent(IN) :: par
 
         real(dp), allocatable :: kernel(:,:), tx(:,:), ty(:,:)
-        real(dp) :: h_avg, scale, width, dist, kernel_sum
+        real(dp) :: h_avg, scale, width, dist, kernel_sum, dh
         integer  :: kernel_size, frb, i, j, ni, nj, nx, ny
 
         nx = size(phi_0,1); ny = size(phi_0,2)
@@ -463,7 +464,7 @@ contains
         !$omp parallel do default(shared) private(i,j) schedule(static)
         do j = 2, ny-1
             do i = 1, nx
-                minus_grad_phi_y(i,j) = -(phi_0(i,j+1) - phi_0(i,j-1)) / (2.0_dp * dx)
+                minus_grad_phi_y(i,j) = -(phi_0(i,j+1) - phi_0(i,j-1)) / (2.0_dp * dy)
             end do
         end do
         !$omp end parallel do
@@ -484,21 +485,23 @@ contains
 
         scale = h_avg * par%long_coupling_water * 2.0_dp
         width = 2.0_dp * scale
-        if (width <= dx) then
-            scale = dx / 2.0_dp + 1.0_dp
+        ! Kernel size sized by the finer spacing (smaller -> more cells per scale).
+        dh = min(dx, dy)
+        if (width <= dh) then
+            scale = dh / 2.0_dp + 1.0_dp
             width = 2.0_dp * scale
         end if
 
-        kernel_size = 2 * nint(width / dx - 0.5_dp) + 1
+        kernel_size = 2 * nint(width / dh - 0.5_dp) + 1
         frb = (kernel_size - 1) / 2
 
-        ! Cone kernel
+        ! Cone kernel (anisotropic-aware: physical distance uses dx, dy separately)
         allocate(kernel(kernel_size, kernel_size))
         kernel = 0.0_dp
         do nj = 1, kernel_size
             do ni = 1, kernel_size
                 dist = sqrt( (dx * real(ni - frb - 1, dp))**2 + &
-                             (dx * real(nj - frb - 1, dp))**2 ) / scale
+                             (dy * real(nj - frb - 1, dp))**2 ) / scale
                 kernel(ni,nj) = max(0.0_dp, 1.0_dp - dist / 2.0_dp)
             end do
         end do
@@ -627,23 +630,23 @@ contains
     ! current numerics; the toposort variant is provided for A/B comparison
     ! and for promotion to default once validated.
     ! ============================================================
-    subroutine update_psi_out(psi_out, m_dot, dx_sq, &
+    subroutine update_psi_out(psi_out, m_dot, cell_area, &
                               minus_grad_phi_x, minus_grad_phi_y, abs_grad_phi, mask, &
                               flux_solver)
         implicit none
         real(dp), intent(INOUT) :: psi_out(:,:)
-        real(dp), intent(IN)    :: m_dot(:,:), dx_sq
+        real(dp), intent(IN)    :: m_dot(:,:), cell_area
         real(dp), intent(IN)    :: minus_grad_phi_x(:,:), minus_grad_phi_y(:,:)
         real(dp), intent(IN)    :: abs_grad_phi(:,:), mask(:,:)
         integer,  intent(IN)    :: flux_solver
 
         select case (flux_solver)
             case (K24_FLUX_RECURSIVE)
-                call update_psi_out_recursive(psi_out, m_dot, dx_sq, &
+                call update_psi_out_recursive(psi_out, m_dot, cell_area, &
                                               minus_grad_phi_x, minus_grad_phi_y, &
                                               abs_grad_phi, mask)
             case (K24_FLUX_TOPOSORT)
-                call update_psi_out_toposort(psi_out, m_dot, dx_sq, &
+                call update_psi_out_toposort(psi_out, m_dot, cell_area, &
                                              minus_grad_phi_x, minus_grad_phi_y, &
                                              abs_grad_phi, mask)
             case default
@@ -654,12 +657,12 @@ contains
     end subroutine update_psi_out
 
     ! --- Recursive (DFS + memoization) --------------------------
-    subroutine update_psi_out_recursive(psi_out, m_dot, dx_sq, &
+    subroutine update_psi_out_recursive(psi_out, m_dot, cell_area, &
                                         minus_grad_phi_x, minus_grad_phi_y, &
                                         abs_grad_phi, mask)
         implicit none
         real(dp), intent(INOUT) :: psi_out(:,:)
-        real(dp), intent(IN)    :: m_dot(:,:), dx_sq
+        real(dp), intent(IN)    :: m_dot(:,:), cell_area
         real(dp), intent(IN)    :: minus_grad_phi_x(:,:), minus_grad_phi_y(:,:)
         real(dp), intent(IN)    :: abs_grad_phi(:,:), mask(:,:)
         integer  :: i, j, nx, ny
@@ -680,7 +683,7 @@ contains
         do j = 1, ny
             do i = 1, nx
                 if (mask(i,j) == 1.0_dp) then
-                    dummy = accumulate_psi_out_recursive(psi_out, i, j, m_dot, dx_sq, &
+                    dummy = accumulate_psi_out_recursive(psi_out, i, j, m_dot, cell_area, &
                                                          minus_grad_phi_x, minus_grad_phi_y, &
                                                          abs_grad_phi, nx, ny)
                 end if
@@ -688,13 +691,13 @@ contains
         end do
     end subroutine update_psi_out_recursive
 
-    recursive function accumulate_psi_out_recursive(psi_out, i, j, m_dot, dx_sq, &
+    recursive function accumulate_psi_out_recursive(psi_out, i, j, m_dot, cell_area, &
                                                     minus_grad_phi_x, minus_grad_phi_y, &
                                                     abs_grad_phi, nx, ny) result(psi_value)
         implicit none
         integer,  intent(IN)    :: i, j, nx, ny
         real(dp), intent(INOUT) :: psi_out(:,:)
-        real(dp), intent(IN)    :: m_dot(:,:), dx_sq
+        real(dp), intent(IN)    :: m_dot(:,:), cell_area
         real(dp), intent(IN)    :: minus_grad_phi_x(:,:), minus_grad_phi_y(:,:)
         real(dp), intent(IN)    :: abs_grad_phi(:,:)
         real(dp) :: psi_value
@@ -708,7 +711,7 @@ contains
             return
         end if
 
-        psi_out(i,j) = max(0.0_dp, m_dot(i,j) * dx_sq)
+        psi_out(i,j) = max(0.0_dp, m_dot(i,j) * cell_area)
 
         do dir_idx = 1, 4
             ni = i + directions(1, dir_idx)
@@ -723,7 +726,7 @@ contains
 
             if (w > 0.0_dp) then
                 psi_out(i,j) = psi_out(i,j) + &
-                    accumulate_psi_out_recursive(psi_out, ni, nj, m_dot, dx_sq, &
+                    accumulate_psi_out_recursive(psi_out, ni, nj, m_dot, cell_area, &
                                                  minus_grad_phi_x, minus_grad_phi_y, &
                                                  abs_grad_phi, nx, ny) * w
             end if
@@ -746,12 +749,12 @@ contains
     ! Edge convention (unchanged from recursive form): cell n with negative
     ! direction vector d delivers flow into cell c = n + d when the weight
     ! w_{n→c} = -(grad_x(n)*d_x + grad_y(n)*d_y) / |grad(n)| is positive.
-    subroutine update_psi_out_toposort(psi_out, m_dot, dx_sq, &
+    subroutine update_psi_out_toposort(psi_out, m_dot, cell_area, &
                                        minus_grad_phi_x, minus_grad_phi_y, &
                                        abs_grad_phi, mask)
         implicit none
         real(dp), intent(INOUT) :: psi_out(:,:)
-        real(dp), intent(IN)    :: m_dot(:,:), dx_sq
+        real(dp), intent(IN)    :: m_dot(:,:), cell_area
         real(dp), intent(IN)    :: minus_grad_phi_x(:,:), minus_grad_phi_y(:,:)
         real(dp), intent(IN)    :: abs_grad_phi(:,:), mask(:,:)
 
@@ -774,7 +777,7 @@ contains
         do j = 1, ny
             do i = 1, nx
                 if (mask(i,j) == 1.0_dp) then
-                    psi_out(i,j) = max(0.0_dp, m_dot(i,j) * dx_sq)
+                    psi_out(i,j) = max(0.0_dp, m_dot(i,j) * cell_area)
                 end if
             end do
         end do
@@ -887,22 +890,22 @@ contains
         !$omp end parallel do
     end subroutine update_Po
 
-    subroutine compute_W_into(W, q_flux, abs_grad_phi_s, mask, eta_w, W_min, W_max, sec_per_year)
-        ! W = (12 * eta_w * q_si / mean(|grad phi_0_smoothed|))^(1/3),
+    subroutine compute_W_into(W, q_flux, abs_grad_phi_s, mask, eta_w, W_min, W_max)
+        ! W = (12 * eta_w * q / mean(|grad phi_0_smoothed|))^(1/3),
         ! clamped to [W_min, W_max]. q_flux is the per-conduit-spacing
-        ! distributed flux in [m2/a]; converted to [m2/s] via sec_per_year.
-        ! abs_grad_phi_s is the smoothed gradient magnitude [Pa/m]; its mean
-        ! over mask==1 cells is used as a single scalar (matches update_W!
-        ! in TakisAngelides/FastHydrology.jl/water_flux.jl).
+        ! distributed flux in [m2/s] (SI). abs_grad_phi_s is the smoothed
+        ! gradient magnitude [Pa/m]; its mean over mask==1 cells is used as
+        ! a single scalar (matches update_W! in
+        ! TakisAngelides/FastHydrology.jl/water_flux.jl).
 
         implicit none
 
         real(dp), intent(OUT) :: W(:,:)
         real(dp), intent(IN)  :: q_flux(:,:), abs_grad_phi_s(:,:), mask(:,:)
-        real(dp), intent(IN)  :: eta_w, W_min, W_max, sec_per_year
+        real(dp), intent(IN)  :: eta_w, W_min, W_max
 
         integer  :: i, j, nx, ny, n_active
-        real(dp) :: g_mean, num, q_si
+        real(dp) :: g_mean, num
 
         nx = size(W,1)
         ny = size(W,2)
@@ -923,11 +926,10 @@ contains
         if (n_active > 0) g_mean = g_mean / real(n_active, dp)
         g_mean = max(g_mean, 1.0e-12_dp)
 
-        !$omp parallel do default(shared) private(i,j,q_si,num) schedule(static)
+        !$omp parallel do default(shared) private(i,j,num) schedule(static)
         do j = 1, ny
             do i = 1, nx
-                q_si    = q_flux(i,j) / sec_per_year
-                num     = 12.0_dp * eta_w * q_si / g_mean
+                num     = 12.0_dp * eta_w * q_flux(i,j) / g_mean
                 W(i,j)  = max(W_min, min(W_max, num**(1.0_dp/3.0_dp)))
             end do
         end do

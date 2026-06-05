@@ -23,10 +23,18 @@ module fast_hydrology
     ! Notation follows van Pelt & Bueler 2015 (BvP15):
     !   W_til : till water storage thickness   [m]
     !   W     : distributed sheet thickness    [m]
-    !   mdot  : source rate from ice base      [m/a today; m/s after Commit 2]
+    !   mdot  : source rate from ice base      [m/s, water-equivalent]
+    !
+    ! Time / unit convention on the public API:
+    !   hydro_update(... time, ...) : time in YEARS (matches host model)
+    !   mdot, uxy_b                 : SI [m/s]
+    !   par%dx, par%dy              : [m]
+    ! Internally everything is SI. dt_year (time - hyd%now%time) is computed
+    ! in years for state bookkeeping; dt_sec = dt_year * SEC_PER_YEAR is the
+    ! denominator used by the bucket update and dW_til_dt / overflow rates.
     !
     ! In all cases, hyd%now%dW_til_dt is computed as the natural-sign change
-    ! in W_til over the step: (W_til_new - W_til_old) / dt.
+    ! in W_til over the step: (W_til_new - W_til_old) / dt_sec  [m/s].
 
     use nml
     use fast_hydrology_k24
@@ -38,6 +46,10 @@ module fast_hydrology
     integer, parameter :: dp = kind(1.d0)
     integer, parameter :: sp = kind(1.0)
     integer, parameter :: wp = sp
+
+    ! Seconds per year used to convert the API's time argument (years) to
+    ! the internal dt_sec. Match the value in bucket.f90.
+    real(wp), parameter, public :: SEC_PER_YEAR = 3.1556926e7_wp
 
     ! ---------- method_til enum (par%method_til) ----------
     integer, parameter, public :: TIL_BUCKET   = 0    ! default
@@ -71,12 +83,12 @@ module fast_hydrology
         logical  :: initialized
         real(wp), allocatable :: W_til(:,:)        ! [m]      till storage (bucket)
         real(wp), allocatable :: W_til_max(:,:)    ! [m]      per-cell cap (defaults to par%W_til_max)
-        real(wp), allocatable :: dW_til_dt(:,:)    ! [m/a]    natural-sign change in W_til over the step
-        real(wp), allocatable :: overflow(:,:)     ! [m/a]    till-saturation spill -> K24 source
+        real(wp), allocatable :: dW_til_dt(:,:)    ! [m/s]    natural-sign change in W_til over the step
+        real(wp), allocatable :: overflow(:,:)     ! [m/s]    till-saturation spill -> K24 source
         real(wp), allocatable :: W(:,:)            ! [m]      K24 distributed sheet thickness; 0 when TRANSPORT_NONE
         real(wp), allocatable :: p_w(:,:)          ! [Pa]
-        real(wp), allocatable :: q_x(:,:)          ! [m2/a today; m2/s after Commit 2]
-        real(wp), allocatable :: q_y(:,:)
+        real(wp), allocatable :: q_x(:,:)          ! [m2/s]
+        real(wp), allocatable :: q_y(:,:)          ! [m2/s]
         real(wp), allocatable :: N(:,:)            ! [Pa]
         real(wp), allocatable :: kappa(:,:)
     end type
@@ -114,13 +126,6 @@ contains
         end if
 
         call hydro_par_load(hyd%par, filename, nml_group)
-
-        if (hyd%par%dx /= hyd%par%dy) then
-            write(*,*) "hydro_init:: error: K24 currently requires dx == dy."
-            write(*,*) "(Anisotropic grid support arrives in Commit 2.)"
-            write(*,*) "dx = ", hyd%par%dx, "  dy = ", hyd%par%dy
-            stop
-        end if
 
         call hydro_allocate(hyd%now, nx, ny)
 
@@ -243,7 +248,7 @@ contains
         real(dp), allocatable :: q_x_dp(:,:), q_y_dp(:,:), N_dp(:,:), p_w_dp(:,:), W_dp(:,:)
 
         real(wp), allocatable :: W_til_old(:,:)
-        real(wp) :: dt_step
+        real(wp) :: dt_year, dt_sec
         integer  :: nx, ny
 
         if (.not. hyd%now%initialized) then
@@ -257,18 +262,20 @@ contains
         allocate(W_til_old(nx,ny))
         W_til_old = hyd%now%W_til
 
-        dt_step      = max(time - hyd%now%time, 0.0_wp)
+        ! API time is in years; convert step to seconds for internal SI.
+        dt_year      = max(time - hyd%now%time, 0.0_wp)
+        dt_sec       = dt_year * SEC_PER_YEAR
         hyd%now%time = time
-        hyd%now%dt   = dt_step
+        hyd%now%dt   = dt_sec
 
         ! ---- Step 1: till update (W_til + overflow) ----
-        if (dt_step > 0.0_wp) then
+        if (dt_sec > 0.0_wp) then
             select case (hyd%par%method_til)
 
                 case (TIL_BUCKET)
                     call calc_bucket(hyd%now%W_til, hyd%now%overflow, &
                                      f_ice, f_grnd, mask, mdot, &
-                                     dt_step, hyd%par%bucket, hyd%now%W_til_max)
+                                     dt_sec, hyd%par%bucket, hyd%now%W_til_max)
 
                 case (TIL_EXTERNAL)
                     ! Host owns W_til; do not touch it. K24 sees raw source.
@@ -294,7 +301,7 @@ contains
                 hyd%now%q_y = 0.0_wp
 
             case (TRANSPORT_K24)
-                if (dt_step > 0.0_wp) then
+                if (dt_sec > 0.0_wp) then
                     allocate(H_ice_dp(nx,ny), z_bed_dp(nx,ny), mask_dp(nx,ny))
                     allocate(src_dp(nx,ny), uxy_b_dp(nx,ny), A_glen_dp(nx,ny))
                     allocate(kappa_dp(nx,ny))
@@ -311,7 +318,7 @@ contains
                     call calc_k24(q_x_dp, q_y_dp, N_dp, p_w_dp, W_dp, &
                                   H_ice_dp, z_bed_dp, mask_dp, src_dp, uxy_b_dp, A_glen_dp, &
                                   kappa_dp, &
-                                  real(hyd%par%dx, dp), hyd%par%k24)
+                                  real(hyd%par%dx, dp), real(hyd%par%dy, dp), hyd%par%k24)
 
                     hyd%now%q_x = real(q_x_dp, wp)
                     hyd%now%q_y = real(q_y_dp, wp)
@@ -340,14 +347,14 @@ contains
         end if
 
         ! ---- Step 4: W_til overrides ----
-        if (hyd%par%method_til == TIL_BUCKET .and. dt_step > 0.0_wp) then
+        if (hyd%par%method_til == TIL_BUCKET .and. dt_sec > 0.0_wp) then
             call apply_floating_override(hyd%now%W_til, f_ice, f_grnd)
             call apply_mask_bc(hyd%now%W_til, hyd%par%mask_bc, hyd%par%W_til_bc)
         end if
 
         ! ---- Step 5: dW_til_dt ----
-        if (dt_step > 0.0_wp) then
-            hyd%now%dW_til_dt = (hyd%now%W_til - W_til_old) / dt_step
+        if (dt_sec > 0.0_wp) then
+            hyd%now%dW_til_dt = (hyd%now%W_til - W_til_old) / dt_sec
         else
             hyd%now%dW_til_dt = 0.0_wp
         end if
