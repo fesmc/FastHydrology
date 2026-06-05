@@ -106,7 +106,11 @@ program greenland
     n_out  = max(1, nint(dt_out / dt_step))
 
     write(*,'(a)') ""
-    write(*,'(a)') "       time      H_w_max     H_w_mean       N_max      N_mean"
+    if (hyd%par%method == 2) then
+        write(*,'(a)') "       time        W_max       W_mean       N_max      N_mean"
+    else
+        write(*,'(a)') "       time      H_w_max     H_w_mean       N_max      N_mean"
+    end if
 
     do while (time < t_end - 0.5_wp_local*dt_step)
         time   = time + dt_step
@@ -117,9 +121,15 @@ program greenland
         if (mod(n_step, n_out) == 0 .or. time >= t_end) then
             i_out = i_out + 1
             call output_step(out_file, hyd, time, i_out)
-            write(*,'(f12.4, 4es13.4)') time, &
-                maxval(hyd%now%H_w), sum(hyd%now%H_w * mask) / max(1.0_wp_local, sum(mask)), &
-                maxval(hyd%now%N),   sum(hyd%now%N   * mask) / max(1.0_wp_local, sum(mask))
+            if (hyd%par%method == 2) then
+                write(*,'(f12.4, 4es13.4)') time, &
+                    maxval(hyd%now%W), sum(hyd%now%W * mask) / max(1.0_wp_local, sum(mask)), &
+                    maxval(hyd%now%N), sum(hyd%now%N * mask) / max(1.0_wp_local, sum(mask))
+            else
+                write(*,'(f12.4, 4es13.4)') time, &
+                    maxval(hyd%now%H_w), sum(hyd%now%H_w * mask) / max(1.0_wp_local, sum(mask)), &
+                    maxval(hyd%now%N),   sum(hyd%now%N   * mask) / max(1.0_wp_local, sum(mask))
+            end if
         end if
     end do
 
@@ -154,9 +164,11 @@ contains
 
         call nc_write(filename, "time",  time,             dim1="time", start=[n], count=[1])
         call nc_write(filename, "H_w",   hyd%now%H_w,      dim1="xc", dim2="yc", dim3="time", &
-                      start=[1,1,n], units="m",     long_name="Basal water layer thickness")
+                      start=[1,1,n], units="m",     long_name="Basal water storage column (BUCKET)")
         call nc_write(filename, "dHwdt", hyd%now%dHwdt,    dim1="xc", dim2="yc", dim3="time", &
                       start=[1,1,n], units="m a-1", long_name="Rate of change of H_w")
+        call nc_write(filename, "W",     hyd%now%W,        dim1="xc", dim2="yc", dim3="time", &
+                      start=[1,1,n], units="m",     long_name="Distributed sheet water-layer thickness (K24)")
         call nc_write(filename, "N",     hyd%now%N,        dim1="xc", dim2="yc", dim3="time", &
                       start=[1,1,n], units="Pa",    long_name="Effective pressure")
         call nc_write(filename, "p_w",   hyd%now%p_w,      dim1="xc", dim2="yc", dim3="time", &

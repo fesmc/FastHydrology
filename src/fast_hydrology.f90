@@ -12,13 +12,14 @@ module fast_hydrology
     !   NONE     : writes nothing; H_w externally managed.
     !   BUCKET   : writes H_w (with floating/grounded-ice-free overrides);
     !              optionally writes N, p_w via par%bucket%N_closure.
-    !   K24      : writes q_x, q_y, N, p_w, and the equilibrium H_w that
-    !              K24 produces (hyd%now%H_w := H_w_eq directly). Hosts
-    !              that want a relaxation/instant rule on their own H_w
-    !              field can call relax_H_w(H_w, H_w_eq, tau, dt).
+    !   K24      : writes q_x, q_y, N, p_w, and W (distributed sheet water
+    !              layer thickness, Kazmierczak 2022 Eq. 8). Does NOT touch
+    !              H_w -- that field is reserved for storage-style methods.
+    !              Hosts that want to relax their own H_w field toward an
+    !              equilibrium can use relax_H_w.
     !
     ! In all cases, hyd%now%dHwdt is computed as the natural-sign change
-    ! over the step: (H_w_new - H_w_old) / dt.
+    ! in H_w over the step: (H_w_new - H_w_old) / dt.
 
     use nml
     use fast_hydrology_k24
@@ -58,8 +59,9 @@ module fast_hydrology
         real(wp) :: time
         real(wp) :: dt
         logical  :: initialized
-        real(wp), allocatable :: H_w(:,:)
+        real(wp), allocatable :: H_w(:,:)    ! [m] basal water storage column (BUCKET); unused by K24
         real(wp), allocatable :: dHwdt(:,:)
+        real(wp), allocatable :: W(:,:)      ! [m] K24 distributed sheet water-layer thickness; 0 for BUCKET
         real(wp), allocatable :: p_w(:,:)
         real(wp), allocatable :: q_x(:,:)
         real(wp), allocatable :: q_y(:,:)
@@ -161,12 +163,14 @@ contains
         end select
 
         ! Zero H_w outside the active (grounded ice) set, then apply the
-        ! configurable domain-border BC. Same rule for both BUCKET and K24:
-        ! only cells with f_grnd > 0 .and. f_ice > 0 carry hydrology state.
+        ! configurable domain-border BC. H_w is only meaningful for BUCKET;
+        ! K24 uses W instead, so this is mostly a no-op for K24 but keeps
+        ! the init state tidy.
         call apply_floating_override(hyd%now%H_w, f_ice, f_grnd)
         call apply_mask_bc(hyd%now%H_w, hyd%par%mask_bc, hyd%par%H_w_bc)
 
         hyd%now%dHwdt = 0.0_wp
+        hyd%now%W     = 0.0_wp
         hyd%now%p_w   = 0.0_wp
         hyd%now%q_x   = 0.0_wp
         hyd%now%q_y   = 0.0_wp
@@ -201,7 +205,7 @@ contains
         real(dp), allocatable :: H_ice_dp(:,:), z_bed_dp(:,:), mask_dp(:,:)
         real(dp), allocatable :: bmb_w_dp(:,:), uxy_b_dp(:,:), A_glen_dp(:,:)
         real(dp), allocatable :: kappa_dp(:,:)
-        real(dp), allocatable :: q_x_dp(:,:), q_y_dp(:,:), N_dp(:,:), p_w_dp(:,:), H_w_eq_dp(:,:)
+        real(dp), allocatable :: q_x_dp(:,:), q_y_dp(:,:), N_dp(:,:), p_w_dp(:,:), W_dp(:,:)
 
         real(wp), allocatable :: H_w_old(:,:)
         real(wp) :: dt_step
@@ -244,7 +248,7 @@ contains
                     allocate(H_ice_dp(nx,ny), z_bed_dp(nx,ny), mask_dp(nx,ny))
                     allocate(bmb_w_dp(nx,ny), uxy_b_dp(nx,ny), A_glen_dp(nx,ny))
                     allocate(kappa_dp(nx,ny))
-                    allocate(q_x_dp(nx,ny), q_y_dp(nx,ny), N_dp(nx,ny), p_w_dp(nx,ny), H_w_eq_dp(nx,ny))
+                    allocate(q_x_dp(nx,ny), q_y_dp(nx,ny), N_dp(nx,ny), p_w_dp(nx,ny), W_dp(nx,ny))
 
                     H_ice_dp  = real(H_ice,         dp)
                     z_bed_dp  = real(z_bed,         dp)
@@ -254,7 +258,7 @@ contains
                     A_glen_dp = real(A_glen,        dp)
                     kappa_dp  = real(hyd%now%kappa, dp)
 
-                    call calc_k24(q_x_dp, q_y_dp, N_dp, p_w_dp, H_w_eq_dp, &
+                    call calc_k24(q_x_dp, q_y_dp, N_dp, p_w_dp, W_dp, &
                                   H_ice_dp, z_bed_dp, mask_dp, bmb_w_dp, uxy_b_dp, A_glen_dp, &
                                   kappa_dp, &
                                   real(hyd%par%dx, dp), hyd%par%k24)
@@ -263,12 +267,14 @@ contains
                     hyd%now%q_y = real(q_y_dp, wp)
                     hyd%now%N   = real(N_dp,   wp)
                     hyd%now%p_w = real(p_w_dp, wp)
-                    hyd%now%H_w = real(H_w_eq_dp, wp)
+                    hyd%now%W   = real(W_dp,   wp)
+                    ! K24 leaves H_w untouched -- H_w is reserved for storage-style
+                    ! methods (BUCKET). K24's sheet-thickness diagnostic is W.
 
                     deallocate(H_ice_dp, z_bed_dp, mask_dp)
                     deallocate(bmb_w_dp, uxy_b_dp, A_glen_dp)
                     deallocate(kappa_dp)
-                    deallocate(q_x_dp, q_y_dp, N_dp, p_w_dp, H_w_eq_dp)
+                    deallocate(q_x_dp, q_y_dp, N_dp, p_w_dp, W_dp)
                 end if
 
             case default
@@ -278,16 +284,15 @@ contains
 
         end select
 
-        ! Post-step H_w overrides apply only to methods that *write* H_w
-        ! internally (BUCKET, K24). NONE and EXTERNAL leave H_w alone.
+        ! Post-step H_w overrides apply only to BUCKET (the only method that
+        ! writes H_w). K24 leaves H_w untouched -- its diagnostic sheet
+        ! thickness lives in hyd%now%W instead. NONE and EXTERNAL also leave
+        ! H_w alone.
         ! Order:
-        !   1. zero H_w outside the active grounded-ice set (same rule for
-        !      both BUCKET and K24: f_grnd > 0 .and. f_ice > 0 is active;
-        !      everything else is set to 0). Cannot influence K24's next
-        !      call because calc_k24 doesn't read H_w as an input.
+        !   1. zero H_w outside the active grounded-ice set
+        !      (f_grnd > 0 .and. f_ice > 0).
         !   2. domain-border BC -- final pass on the i=1, i=nx, j=1, j=ny rim.
-        if ((hyd%par%method == HYDRO_METHOD_BUCKET .or. &
-             hyd%par%method == HYDRO_METHOD_K24) .and. dt_step > 0.0_wp) then
+        if (hyd%par%method == HYDRO_METHOD_BUCKET .and. dt_step > 0.0_wp) then
             call apply_floating_override(hyd%now%H_w, f_ice, f_grnd)
             call apply_mask_bc(hyd%now%H_w, hyd%par%mask_bc, hyd%par%H_w_bc)
         end if
@@ -471,6 +476,7 @@ contains
 
         allocate(now%H_w(nx,ny))
         allocate(now%dHwdt(nx,ny))
+        allocate(now%W(nx,ny))
         allocate(now%p_w(nx,ny))
         allocate(now%q_x(nx,ny))
         allocate(now%q_y(nx,ny))
@@ -479,6 +485,7 @@ contains
 
         now%H_w   = 0.0_wp
         now%dHwdt = 0.0_wp
+        now%W     = 0.0_wp
         now%p_w   = 0.0_wp
         now%q_x   = 0.0_wp
         now%q_y   = 0.0_wp
@@ -497,6 +504,7 @@ contains
 
         if (allocated(now%H_w))   deallocate(now%H_w)
         if (allocated(now%dHwdt)) deallocate(now%dHwdt)
+        if (allocated(now%W))     deallocate(now%W)
         if (allocated(now%p_w))   deallocate(now%p_w)
         if (allocated(now%q_x))   deallocate(now%q_x)
         if (allocated(now%q_y))   deallocate(now%q_y)
