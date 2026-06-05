@@ -1,16 +1,18 @@
 {
-    "exe_default" : "libmodel/bin/model.x",
 
-    "par_path_as_argument" : false,
+    "exe_default" : "bin/greenland.x",
+
+    "par_path_as_argument" : true,
 
     "exe_aliases" :
-        {   "main" : "libmodel/bin/model.x"
+        {   "greenland" : "bin/greenland.x",
+            "shmip"     : "bin/shmip.x"
         },
 
     "grp_aliases" : {},
 
     "par_paths" :
-        {   "alias" : "None"
+        {   "alias"  : "None"
         },
 
     "files" :
@@ -22,5 +24,6 @@
     },
 
     "links" :
-        []
+        ["input"]
+
 }

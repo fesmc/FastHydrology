@@ -1,10 +1,9 @@
 # Plot Greenland-example output: side-by-side comparison of two NetCDF
 # files produced by examples/greenland/greenland.x (W_til, N, p_w, and
-# water-flux magnitude). The two files come from two runs of greenland.x
-# with edited &greenland { out_file } and &fhyd { method_transport } in
-# the namelist -- e.g. BUCKET-only (method_transport=0) saved to
-# output/greenland_bucket.nc and BUCKET+K24 (method_transport=1) saved
-# to output/greenland_k24.nc.
+# water-flux magnitude). The two files come from two runme invocations
+# of the example with different &fhyd { method_transport } values --
+# e.g. method_transport=0 saved to output/greenland_bucket/greenland.nc
+# and method_transport=1 saved to output/greenland_k24/greenland.nc.
 #
 # Usage:
 #     julia --project=examples/greenland plot_greenland.jl                # mask ocean (default)
@@ -20,8 +19,8 @@
 using NCDatasets
 using CairoMakie
 
-const DEFAULT_BUCKET  = joinpath(@__DIR__, "..", "..", "output", "greenland_bucket.nc")
-const DEFAULT_K24     = joinpath(@__DIR__, "..", "..", "output", "greenland_k24.nc")
+const DEFAULT_BUCKET  = joinpath(@__DIR__, "..", "..", "output", "greenland_bucket", "greenland.nc")
+const DEFAULT_K24     = joinpath(@__DIR__, "..", "..", "output", "greenland_k24",    "greenland.nc")
 const DEFAULT_OUT     = joinpath(@__DIR__, "..", "..", "output", "greenland_compare.png")
 const DEFAULT_RESTART = joinpath(@__DIR__, "..", "..", "input",  "GRL-16KM_yelmo_restart.nc")
 

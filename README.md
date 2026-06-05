@@ -50,19 +50,25 @@ for the build template and `config/common.mk` for the dependency wiring
 ## Greenland example
 
 End-to-end: build a Greenland-16km hydrology field from a yelmo restart,
-run it for 1000 a, and inspect `W_til`, `W`, `overflow`, and `N`.
+run it for 1000 a, and inspect `W_til`, `W`, `overflow`, and `N`. The
+example is driven by [`runme`](https://github.com/fesmc/runme):
 
 ```sh
 make greenland
-mkdir -p output
-./bin/greenland.x examples/greenland/greenland.nml
+runme -r -e greenland -n examples/greenland/greenland.nml -o output/greenland
 ```
 
-Writes `output/greenland.nc` with `W_til, dW_til_dt, overflow, W, N,
-p_w, q_x, q_y` on the yelmo `(xc, yc, time)` grid and prints a one-line
-summary per output step. Permute configurations by editing the
-`&fhyd { method_til, method_transport }` switches in the namelist (and
-`&greenland { out_file }` so the runs don't clobber each other).
+`runme` stages a clean rundir at `output/greenland/`, symlinks `input/`
+for the restart file, and runs the executable from there. Output ends
+up at `output/greenland/greenland.nc` with all eight fields (`W_til,
+dW_til_dt, overflow, W, N, p_w, q_x, q_y`) on the yelmo `(xc, yc, time)`
+grid. Permute configurations by editing the in-tree namelist's
+`method_til` / `method_transport` switches between `runme` invocations,
+pointing each at a different `-o` rundir; a small wrapper bash script is
+the typical way to run a sweep. See
+[`examples/greenland/README.md`](examples/greenland/README.md) for the
+direct (non-runme) invocation, the plot script, and the namelist
+switches.
 
 Plot the two side-by-side (Julia; first-time `Pkg.instantiate()`):
 

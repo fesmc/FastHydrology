@@ -11,30 +11,71 @@ plotting.
 make greenland
 ```
 
-## Run
+## Run via `runme` (recommended)
+
+The example is set up to be driven by [`runme`](https://github.com/fesmc/runme):
 
 ```sh
-mkdir -p output
-./bin/greenland.x examples/greenland/greenland.nml
+runme -r -e greenland -n examples/greenland/greenland.nml -o output/greenland
 ```
 
-Produces `output/greenland.nc` with `W_til, dW_til_dt, overflow, W, N,
-p_w, q_x, q_y` on the yelmo `(xc, yc, time)` grid.
+`runme` stages a clean rundir at `output/greenland/`, copies in the
+namelist + executable, symlinks `input/` (so the restart file is
+reachable), and runs the executable from that directory. Output ends up
+at `output/greenland/greenland.nc`.
 
-The example takes a single namelist. Toggle the configuration by editing
-`examples/greenland/greenland.nml`:
+Permute by hand without storing extra namelist files: edit the in-tree
+`greenland.nml` between runs, point each at a different `-o` rundir,
+and you get one rundir per permutation. A small bash script that wraps
+several `runme` invocations is a good way to automate this.
+
+For example:
+
+```sh
+# Pure bucket (no transport)
+sed -i.bak 's/method_transport.*/method_transport = 0/' examples/greenland/greenland.nml
+runme -r -e greenland -n examples/greenland/greenland.nml -o output/greenland_bucket
+
+# Bucket + K24
+sed -i.bak 's/method_transport.*/method_transport = 1/' examples/greenland/greenland.nml
+runme -r -e greenland -n examples/greenland/greenland.nml -o output/greenland_k24
+```
+
+## Run directly (no runme)
+
+```sh
+mkdir -p output/greenland_direct && cd output/greenland_direct
+ln -sf ../../input input
+../../bin/greenland.x ../../examples/greenland/greenland.nml
+```
+
+The example writes `greenland.nc` (and reads `input/GRL-16KM_yelmo_restart.nc`)
+relative to the current working directory.
+
+## Output
+
+`greenland.nc` contains the final timestep stack of `W_til, dW_til_dt,
+overflow, W, N, p_w, q_x, q_y` on the yelmo `(xc, yc, time)` grid. The
+diagnostic line printed each output step shows:
+
+```
+       time  W_til_mean       W_mean    overflow       N_mean
+```
+
+`W_til` is in m, `W` is in m, `overflow` is in m/s, `N` is in Pa.
+
+## Namelist switches
 
 - `&fhyd { method_til }`: `0` = BUCKET (default), `1` = EXTERNAL (host
   owns `W_til`).
 - `&fhyd { method_transport }`: `0` = NONE (W = 0, no transport; N from
-  `bucket%N_closure`), `1` = K24 (writes W, q_x, q_y, N, p_w).
-- `&greenland { out_file }`: rename when permuting so successive runs
-  don't overwrite each other.
+  `bucket%N_closure`), `1` = K24.
+- `&fhyd { W_til_max }`: scalar default for the per-cell till cap.
+  Set to `0` to bypass the bucket entirely (all `mdot` flows through to
+  transport).
 
 In sequential coupling, the bucket runs first; once `W_til >= W_til_max(i,j)`
-the saturation overflow becomes the source term for K24. With
-`W_til_max = 0` the bucket holds nothing and the full source `mdot`
-passes through to transport.
+the saturation overflow becomes the source term for K24.
 
 ## Plot (Julia)
 
@@ -45,15 +86,16 @@ environment. First-time setup:
 julia --project=examples/greenland -e 'using Pkg; Pkg.instantiate()'
 ```
 
-For a side-by-side comparison, run `greenland.x` twice with different
-`method_transport` and `out_file` values, then plot:
+For a side-by-side comparison, run `greenland.x` twice (typically with
+different `method_transport`), then plot:
 
 ```sh
 julia --project=examples/greenland examples/greenland/plot_greenland.jl
 ```
 
-The plotter defaults to reading `output/greenland_bucket.nc` and
-`output/greenland_k24.nc`; override the filenames as positional args.
+The plotter defaults to `output/greenland_bucket/greenland.nc` and
+`output/greenland_k24/greenland.nc` (the rundirs produced by the
+example commands above). Override the filenames as positional args.
 Writes `output/greenland_compare.png`.
 
 ## Notes
