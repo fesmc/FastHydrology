@@ -8,7 +8,7 @@ program shmip
     ! (SHMIP C is not currently supported: real C resolution needs dt ~ minutes,
     !  which is out of scope for this driver.)
     !
-    ! Output written to a NetCDF file with H_w, dHwdt, N, p_w, q_x, q_y
+    ! Output written to a NetCDF file with W_til, dW_til_dt, overflow, W, N, p_w, q_x, q_y
     ! per output step.
 
     use nml
@@ -45,7 +45,7 @@ program shmip
 
     real(wp_local), allocatable :: H_ice(:,:), z_bed(:,:), z_sl(:,:)
     real(wp_local), allocatable :: f_ice(:,:), f_grnd(:,:), mask(:,:)
-    real(wp_local), allocatable :: bmb_w(:,:), uxy_b(:,:), A_glen(:,:)
+    real(wp_local), allocatable :: mdot(:,:), uxy_b(:,:), A_glen(:,:)
     real(wp_local), allocatable :: xc(:), yc(:)
 
     type(hydro_class) :: hyd
@@ -78,7 +78,7 @@ program shmip
 
     allocate(H_ice(nx,ny), z_bed(nx,ny), z_sl(nx,ny))
     allocate(f_ice(nx,ny), f_grnd(nx,ny), mask(nx,ny))
-    allocate(bmb_w(nx,ny), uxy_b(nx,ny), A_glen(nx,ny))
+    allocate(mdot(nx,ny), uxy_b(nx,ny), A_glen(nx,ny))
     allocate(xc(nx), yc(ny))
 
     call setup_case(shmip_case, nx, ny, H_ice, z_bed, xc, yc, cs)
@@ -90,16 +90,17 @@ program shmip
     uxy_b  = uxy_b_const
     A_glen = A_glen_const
 
-    call update_forcing(cs, t_start, bmb_w)
+    call update_forcing(cs, t_start, mdot)
 
     call hydro_init(hyd, nml_file, nx, ny)
     hyd%par%dx = cs%dx
     hyd%par%dy = cs%dy
     call hydro_init_state(hyd, z_bed, f_ice, f_grnd, t_start)
 
-    write(*,'(a,i0,a)')      "  method  = ", hyd%par%method, " (0=NONE 1=BUCKET 2=K24)"
-    write(*,'(a,i0)')        "  N_clos  = ", hyd%par%bucket%N_closure
-    write(*,'(a,es12.3,a)')  "  bg melt = ", cs%m_s_background, " m/s"
+    write(*,'(a,i0,a)')      "  method_til       = ", hyd%par%method_til, " (0=BUCKET 1=EXTERNAL)"
+    write(*,'(a,i0,a)')      "  method_transport = ", hyd%par%method_transport, " (0=NONE 1=K24)"
+    write(*,'(a,i0)')        "  N_clos           = ", hyd%par%bucket%N_closure
+    write(*,'(a,es12.3,a)')  "  bg melt          = ", cs%m_s_background, " m/s"
     if (cs%has_moulins) then
         write(*,'(a,es12.3,a,i0,a)') "  moulins = ", cs%Q_moulin_total, " m3/s total over ", N_MOULIN, " points"
     end if
@@ -112,22 +113,22 @@ program shmip
     n_step = 0
 
     write(*,'(a)') ""
-    write(*,'(a)') "       time      H_w_max     H_w_mean       N_max      N_mean"
+    write(*,'(a)') "       time    W_til_max   W_til_mean       N_max      N_mean"
 
     do while (time < t_end - 0.5_wp_local*dt_step)
         time = time + dt_step
         n_step = n_step + 1
 
-        call update_forcing(cs, time, bmb_w)
+        call update_forcing(cs, time, mdot)
         call hydro_update(hyd, H_ice, z_bed, z_sl, f_ice, f_grnd, mask, &
-                          bmb_w, uxy_b, A_glen, time)
+                          mdot, uxy_b, A_glen, time)
 
         if (mod(real(n_step,wp_local)*dt_step, dt_out) < 0.5_wp_local*dt_step .or. time >= t_end) then
             i_out = i_out + 1
             call output_step(out_file, hyd, time, i_out)
             write(*,'(f12.4, 4es13.4)') time, &
-                maxval(hyd%now%H_w), sum(hyd%now%H_w)/(nx*ny), &
-                maxval(hyd%now%N),   sum(hyd%now%N)/(nx*ny)
+                maxval(hyd%now%W_til), sum(hyd%now%W_til)/(nx*ny), &
+                maxval(hyd%now%N),     sum(hyd%now%N)/(nx*ny)
         end if
     end do
 
@@ -186,8 +187,8 @@ contains
 
     end subroutine setup_case
 
-    subroutine update_forcing(cs, time, bmb_w)
-        ! Fill bmb_w (m/a, water-equivalent) from the case state at the
+    subroutine update_forcing(cs, time, mdot)
+        ! Fill mdot (m/a, water-equivalent) from the case state at the
         ! given time. Distributed background scaled per case; moulin
         ! contributions added as point sources.
 
@@ -195,13 +196,13 @@ contains
 
         type(case_state_t), intent(IN)  :: cs
         real(wp_local),     intent(IN)  :: time
-        real(wp_local),     intent(OUT) :: bmb_w(:,:)
+        real(wp_local),     intent(OUT) :: mdot(:,:)
 
         real(wp_local) :: m_s, Q, q_per_cell, scale
         integer        :: k, i, j, nx, ny
 
-        nx = size(bmb_w,1)
-        ny = size(bmb_w,2)
+        nx = size(mdot,1)
+        ny = size(mdot,2)
 
         ! Distributed background, optionally seasonal
         if (cs%is_seasonal) then
@@ -213,7 +214,7 @@ contains
             m_s = cs%m_s_background
         end if
 
-        bmb_w = m_s * SEC_PER_YEAR
+        mdot = m_s * SEC_PER_YEAR
 
         ! Moulin point sources
         if (cs%has_moulins) then
@@ -222,7 +223,7 @@ contains
             do k = 1, N_MOULIN
                 i = cs%ix_moulin(k)
                 j = cs%jy_moulin(k)
-                bmb_w(i,j) = bmb_w(i,j) + q_per_cell
+                mdot(i,j) = mdot(i,j) + q_per_cell
             end do
         end if
 
@@ -331,18 +332,22 @@ contains
         real(wp_local),   intent(IN) :: time
         integer,          intent(IN) :: n
 
-        call nc_write(filename, "time",  time,             dim1="time", start=[n], count=[1])
-        call nc_write(filename, "H_w",   hyd%now%H_w,      dim1="xc", dim2="yc", dim3="time", &
-                      start=[1,1,n], units="m",     long_name="Basal water layer thickness")
-        call nc_write(filename, "dHwdt", hyd%now%dHwdt,    dim1="xc", dim2="yc", dim3="time", &
-                      start=[1,1,n], units="m a-1", long_name="Rate of change of H_w")
-        call nc_write(filename, "N",     hyd%now%N,        dim1="xc", dim2="yc", dim3="time", &
+        call nc_write(filename, "time",     time,               dim1="time", start=[n], count=[1])
+        call nc_write(filename, "W_til",    hyd%now%W_til,      dim1="xc", dim2="yc", dim3="time", &
+                      start=[1,1,n], units="m",     long_name="Till water storage thickness")
+        call nc_write(filename, "dW_til_dt",hyd%now%dW_til_dt,  dim1="xc", dim2="yc", dim3="time", &
+                      start=[1,1,n], units="m a-1", long_name="Rate of change of W_til")
+        call nc_write(filename, "overflow", hyd%now%overflow,   dim1="xc", dim2="yc", dim3="time", &
+                      start=[1,1,n], units="m a-1", long_name="Till-saturation overflow rate")
+        call nc_write(filename, "W",        hyd%now%W,          dim1="xc", dim2="yc", dim3="time", &
+                      start=[1,1,n], units="m",     long_name="Distributed sheet water-layer thickness (K24)")
+        call nc_write(filename, "N",        hyd%now%N,          dim1="xc", dim2="yc", dim3="time", &
                       start=[1,1,n], units="Pa",    long_name="Effective pressure")
-        call nc_write(filename, "p_w",   hyd%now%p_w,      dim1="xc", dim2="yc", dim3="time", &
+        call nc_write(filename, "p_w",      hyd%now%p_w,        dim1="xc", dim2="yc", dim3="time", &
                       start=[1,1,n], units="Pa",    long_name="Water pressure")
-        call nc_write(filename, "q_x",   hyd%now%q_x,      dim1="xc", dim2="yc", dim3="time", &
+        call nc_write(filename, "q_x",      hyd%now%q_x,        dim1="xc", dim2="yc", dim3="time", &
                       start=[1,1,n], units="m2 s-1",long_name="Water flux x-component")
-        call nc_write(filename, "q_y",   hyd%now%q_y,      dim1="xc", dim2="yc", dim3="time", &
+        call nc_write(filename, "q_y",      hyd%now%q_y,        dim1="xc", dim2="yc", dim3="time", &
                       start=[1,1,n], units="m2 s-1",long_name="Water flux y-component")
 
     end subroutine output_step

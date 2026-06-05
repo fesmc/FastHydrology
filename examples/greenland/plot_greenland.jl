@@ -1,5 +1,5 @@
 # Plot Greenland-example output: side-by-side comparison of BUCKET vs K24
-# H_w, N, p_w, and water flux magnitude. Reads the two NetCDF files
+# W_til, N, p_w, and water flux magnitude. Reads the two NetCDF files
 # written by examples/greenland/greenland.x.
 #
 # Usage:
@@ -66,8 +66,8 @@ function apply_ocean_mask(data, f_grnd)
 end
 
 xc, yc = load_coords(bucket_file)
-fields = ["H_w", "N", "p_w"]
-field_labels = Dict("H_w" => "H_w [m]", "N" => "N [Pa]", "p_w" => "p_w [Pa]")
+fields = ["W_til", "N", "p_w"]
+field_labels = Dict("W_til" => "W_til [m]", "N" => "N [Pa]", "p_w" => "p_w [Pa]")
 
 bucket_data = Dict(f => load_last(bucket_file, f) for f in fields)
 k24_data    = Dict(f => load_last(k24_file,    f) for f in fields)
@@ -89,11 +89,11 @@ if mask_ocean
     end
 end
 
-plot_fields = ["H_w", "N", "p_w", "|q|"]
+plot_fields = ["W_til", "N", "p_w", "|q|"]
 
-# BUCKET only writes H_w and (via the closure post-step) N. p_w and |q|
+# BUCKET only writes W_til and (via the closure post-step) N. p_w and |q|
 # carry no useful information in BUCKET mode -- skip those panels.
-const BUCKET_FIELDS = Set(["H_w", "N"])
+const BUCKET_FIELDS = Set(["W_til", "N"])
 
 println("plotting → $out_png")
 
@@ -103,14 +103,14 @@ function panel_range(data, field)
     vmask = .!isnan.(data)
     vmax  = any(vmask) ? maximum(abs, data[vmask]) : 0.0
     vmax  = vmax > 0 ? vmax : 1.0
-    if field in ("H_w", "|q|")
+    if field in ("W_til", "|q|")
         return (0.0, vmax)
     else
         return (-vmax, vmax)
     end
 end
 
-panel_cmap(field) = field in ("H_w", "|q|") ? :viridis : :balance
+panel_cmap(field) = field in ("W_til", "|q|") ? :viridis : :balance
 
 # 4 rows x 4 cols (bucket | cbar | k24 | cbar), one row per field
 fig = Figure(size = (1400, 1800))

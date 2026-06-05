@@ -2,7 +2,9 @@ module fast_hydrology_k24
     ! K24 effective-pressure / water-flux model.
     ! Diagnostic only: reads ice geometry, bed, melt, sliding speed and
     ! Glen rate factor; returns water flux components (q_x, q_y), effective
-    ! pressure (N) and water pressure (p_w = Po - N). Does not evolve H_w.
+    ! pressure (N) and water pressure (p_w = Po - N). Produces the sheet
+    ! thickness W (between till and ice base). Does not touch the till
+    ! storage W_til, which is owned by the bucket model.
 
     use nml
 
@@ -43,8 +45,8 @@ module fast_hydrology_k24
         ! [Wmin, Wmax]. See Kazmierczak et al 2022 Eq. (8), update_W! in the
         ! Julia reference (TakisAngelides/FastHydrology.jl/water_flux.jl).
         real(dp) :: eta_w                          ! [Pa s] water dynamic viscosity
-        real(dp) :: W_min                          ! [m]   lower clamp on H_w
-        real(dp) :: W_max                          ! [m]   upper clamp on H_w
+        real(dp) :: W_min                          ! [m]   lower clamp on W (sheet)
+        real(dp) :: W_max                          ! [m]   upper clamp on W (sheet)
     end type
 
     private
@@ -171,26 +173,32 @@ contains
     ! ============================================================
     ! Top-level K24 driver
     ! ============================================================
-    subroutine calc_k24(q_x, q_y, N, p_w, H_w, &
-                       H_ice, z_bed, mask, bmb_w, uxy_b, A_glen, kappa, &
+    subroutine calc_k24(q_x, q_y, N, p_w, W, &
+                       H_ice, z_bed, mask, mdot, uxy_b, A_glen, kappa, &
                        dx, par)
 
-        ! H_w is the sheet water layer thickness, per Kazmierczak et al
-        ! 2022 Eq. (8): W = (12 * eta_w * q / mean(|grad phi0_smoothed|))^(1/3)
+        ! W is the distributed sheet water-layer thickness between till
+        ! and ice base, per Kazmierczak et al 2022 Eq. (8):
+        !   W = (12 * eta_w * q / mean(|grad phi0_smoothed|))^(1/3)
         ! clamped to [W_min, W_max]. q is the per-conduit-spacing distributed
         ! flux [m2/s], converted from the Fortran m_dot units below. See
         ! update_W! in TakisAngelides/FastHydrology.jl/water_flux.jl.
+        !
+        ! The source `mdot` is the water source rate fed into the transport
+        ! solver. In sequential bucket->K24 coupling this is the bucket
+        ! overflow (till-saturation spill). In TIL_EXTERNAL mode it can be
+        ! the raw basal-melt water equivalent.
 
         implicit none
 
         real(dp), intent(OUT) :: q_x(:,:), q_y(:,:)     ! water flux components
         real(dp), intent(OUT) :: N(:,:)                 ! effective pressure
         real(dp), intent(OUT) :: p_w(:,:)               ! water pressure (Po - N)
-        real(dp), intent(OUT) :: H_w(:,:)               ! sheet water layer thickness
+        real(dp), intent(OUT) :: W(:,:)                 ! sheet water layer thickness
         real(dp), intent(IN)  :: H_ice(:,:)
         real(dp), intent(IN)  :: z_bed(:,:)
         real(dp), intent(IN)  :: mask(:,:)
-        real(dp), intent(IN)  :: bmb_w(:,:)             ! basal melt (water-equiv. m/a)
+        real(dp), intent(IN)  :: mdot(:,:)              ! source rate (water-equiv. m/a today; m/s after Commit 2)
         real(dp), intent(IN)  :: uxy_b(:,:)             ! basal sliding speed magnitude
         real(dp), intent(IN)  :: A_glen(:,:)
         real(dp), intent(IN)  :: kappa(:,:)
@@ -223,9 +231,11 @@ contains
         K = (2.0_dp / 3.14159265358979323846_dp)**0.25_dp * &
             sqrt((3.14159265358979323846_dp + 2.0_dp) / (par%water_density * par%friction_factor))
 
-        ! Caller passes melt as m/a water-equivalent; K24 uses m_dot/rho_w
-        ! conventionally in the same unit space — match original program.
-        m_dot = bmb_w
+        ! Caller passes source rate; K24 uses m_dot in the same unit space.
+        ! Today: m/a water-equivalent (matches original program). After
+        ! Commit 2: m/s SI; the s_per_yr scaling inside compute_W_into
+        ! retires accordingly.
+        m_dot = mdot
 
         ! ========== Distributed water flux ==========
         h_for_pot = H_ice
@@ -275,7 +285,7 @@ contains
         ! ========== Sheet water-layer thickness (Kazmierczak 2022 Eq. 8) ==========
         !   W = (12 * eta_w * q_si / mean(|grad phi_0_smoothed|))^(1/3),
         !   clamped to [W_min, W_max]. q_si = q_flux / seconds_per_year (m2/s).
-        call compute_W_into(H_w, q_flux, abs_grad_phi, mask, &
+        call compute_W_into(W, q_flux, abs_grad_phi, mask, &
                             par%eta_w, par%W_min, par%W_max, par%seconds_per_year)
 
         ! ========== Effective pressure ==========
@@ -350,7 +360,7 @@ contains
                     q_y(i,j) = 0.0_dp
                 end if
                 p_w(i,j) = Po(i,j) - N(i,j)
-                ! H_w already populated by compute_W_into above.
+                ! W already populated by compute_W_into above.
             end do
         end do
         !$omp end parallel do

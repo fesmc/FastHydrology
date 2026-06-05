@@ -1,20 +1,29 @@
 # FastHydrology
 
 A Fortran library of basal-hydrology models for ice-sheet simulations.
-Selectable at runtime via a single `method` switch:
+Two orthogonal switches select how till water storage and water transport
+are handled, run sequentially each step.
 
-| `method` | name     | what FastHydrology writes                         |
-|---------:|----------|---------------------------------------------------|
-|       -1 | EXTERNAL | nothing on `H_w`; closure writes `N`, `p_w`       |
-|        0 | NONE     | nothing                                           |
-|        1 | BUCKET   | `H_w` (local mass-balance); optional `N`, `p_w`   |
-|        2 | K24      | `H_w` (steady-state), `q_x`, `q_y`, `N`, `p_w`    |
+| `method_til`        | what runs on `W_til` (till storage)                     |
+|--------------------:|---------------------------------------------------------|
+| `0` BUCKET (default)| local mass-balance bucket (van Pelt & Bueler 2015 style)|
+| `1` EXTERNAL        | host owns `W_til`; library does not touch it            |
 
-EXTERNAL is the coupling-friendly mode: an ice-sheet model owns `H_w`,
-and FastHydrology only derives effective pressure `N` (and `p_w`) from
-the configured closure on the host's water field. K24 produces an
-equilibrium `H_w`; hosts can evolve their own field toward it with the
-public elemental helper `relax_H_w(H_w, H_w_eq, tau, dt)`.
+| `method_transport` | what runs on `W` (distributed sheet) and `N`            |
+|-------------------:|---------------------------------------------------------|
+| `0` NONE           | `W = 0`, `q_x = q_y = 0`; `N` from `bucket%N_closure`   |
+| `1` K24            | Kazmierczak 2024 distributed model: `W`, `q_x`, `q_y`, `N`, `p_w` |
+
+The till step runs first. When BUCKET is on, any source `mdot` that does
+not fit under `W_til_max` spills over to feed the transport step as its
+source. With `W_til_max = 0` the bucket holds nothing and all source
+flows through to transport. EXTERNAL is the coupling-friendly mode that
+lets a host own `W_til` and use FastHydrology only for `N` and/or
+transport. Notation follows van Pelt & Bueler 2015:
+
+- `W_til` : till water storage thickness   [m]
+- `W`     : distributed sheet thickness    [m]
+- `mdot`  : source rate from ice base      [m/a today; m/s after Commit 2]
 
 ## Build
 
@@ -35,30 +44,23 @@ for the build template and `config/common.mk` for the dependency wiring
 ## Greenland example
 
 End-to-end: build a Greenland-16km hydrology field from a yelmo restart,
-run it for 1000 a, and compare BUCKET vs K24 side-by-side.
+run it for 1000 a, and compare BUCKET-only vs BUCKET+K24 side-by-side.
 
 ```sh
 make greenland
 mkdir -p output
 
-# Bucket model (local mass balance + N closure)
+# BUCKET only (method_til=BUCKET, method_transport=NONE)
 ./bin/greenland.x examples/greenland/greenland_bucket.nml
 
-# K24 model (steady-state distributed)
+# BUCKET + K24 (method_til=BUCKET, method_transport=K24)
 ./bin/greenland.x examples/greenland/greenland_k24.nml
 ```
 
 Each run writes a NetCDF file (`output/greenland_bucket.nc`,
-`output/greenland_k24.nc`) with `H_w, dHwdt, N, p_w, q_x, q_y` on the
-yelmo `(xc, yc, time)` grid, and prints a one-line summary per output
-step:
-
-```
-       time      H_w_max     H_w_mean       N_max      N_mean
-    100.0000   2.0000E+00   3.3770E-01   2.9729E+07   1.5435E+07
-   ...
-   1000.0000   2.0000E+00   5.0349E-01   2.9729E+07   1.5435E+07
-```
+`output/greenland_k24.nc`) with `W_til, dW_til_dt, overflow, W, N, p_w,
+q_x, q_y` on the yelmo `(xc, yc, time)` grid, and prints a one-line
+summary per output step.
 
 Plot the two side-by-side (Julia; first-time `Pkg.instantiate()`):
 

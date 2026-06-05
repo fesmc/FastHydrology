@@ -1,25 +1,32 @@
 module fast_hydrology
-    ! Top-level wrapper for basal-hydrology models. Dispatches to one of:
-    !   EXTERNAL - H_w owned by host; closures still run on caller's H_w
-    !   NONE     - no-op (state frozen)
-    !   BUCKET   - local mass-balance bucket (yelmo-equivalent)
-    !   K24      - steady-state distributed model with FFT-smoothed gradients
+    ! Top-level wrapper for basal-hydrology models. Splits the model into
+    ! two orthogonal components run sequentially each step:
     !
-    ! Method-specific contracts:
-    !   EXTERNAL : reads hyd%now%H_w as-is (host owns it); runs the
-    !              configured N closure -> writes N, p_w. No floating
-    !              override, no mask BC.
-    !   NONE     : writes nothing; H_w externally managed.
-    !   BUCKET   : writes H_w (with floating/grounded-ice-free overrides);
-    !              optionally writes N, p_w via par%bucket%N_closure.
-    !   K24      : writes q_x, q_y, N, p_w, and W (distributed sheet water
-    !              layer thickness, Kazmierczak 2022 Eq. 8). Does NOT touch
-    !              H_w -- that field is reserved for storage-style methods.
-    !              Hosts that want to relax their own H_w field toward an
-    !              equilibrium can use relax_H_w.
+    !   method_til       : how the till storage W_til is evolved
+    !       TIL_BUCKET   : local mass-balance bucket (BvP15-style till storage)
+    !                      W_attempt = W_til + dt*(mdot - till_rate)
+    !                      W_til     = clamp(W_attempt, 0, W_til_max)
+    !                      overflow  = max(0, (W_attempt - W_til_max)/dt)
+    !                      With W_til_max(i,j) = 0 the bucket holds nothing
+    !                      and everything passes through as overflow.
+    !       TIL_EXTERNAL : host owns W_til; bucket does not touch it.
+    !                      Overflow = mdot (raw pass-through to transport).
     !
-    ! In all cases, hyd%now%dHwdt is computed as the natural-sign change
-    ! in H_w over the step: (H_w_new - H_w_old) / dt.
+    !   method_transport : how the distributed sheet W is computed
+    !       TRANSPORT_NONE : W = 0, q_x = q_y = 0. N comes from the bucket's
+    !                        N_closure (overburden / marine / till / ...).
+    !       TRANSPORT_K24  : Kazmierczak 2024 distributed model with
+    !                        FFT-smoothed gradients. Writes W, q_x, q_y, N,
+    !                        p_w. The K24 source is the bucket overflow
+    !                        (TIL_BUCKET) or raw mdot (TIL_EXTERNAL).
+    !
+    ! Notation follows van Pelt & Bueler 2015 (BvP15):
+    !   W_til : till water storage thickness   [m]
+    !   W     : distributed sheet thickness    [m]
+    !   mdot  : source rate from ice base      [m/a today; m/s after Commit 2]
+    !
+    ! In all cases, hyd%now%dW_til_dt is computed as the natural-sign change
+    ! in W_til over the step: (W_til_new - W_til_old) / dt.
 
     use nml
     use fast_hydrology_k24
@@ -32,24 +39,27 @@ module fast_hydrology
     integer, parameter :: sp = kind(1.0)
     integer, parameter :: wp = sp
 
-    ! ---------- Method enum (par%method) ----------
-    integer, parameter, public :: HYDRO_METHOD_EXTERNAL = -1
-    integer, parameter, public :: HYDRO_METHOD_NONE     =  0
-    integer, parameter, public :: HYDRO_METHOD_BUCKET   =  1
-    integer, parameter, public :: HYDRO_METHOD_K24      =  2
+    ! ---------- method_til enum (par%method_til) ----------
+    integer, parameter, public :: TIL_BUCKET   = 0    ! default
+    integer, parameter, public :: TIL_EXTERNAL = 1    ! host owns W_til
+
+    ! ---------- method_transport enum (par%method_transport) ----------
+    integer, parameter, public :: TRANSPORT_NONE = 0
+    integer, parameter, public :: TRANSPORT_K24  = 1
 
     ! ---------- Init-method enum (par%init_method) ----------
     integer, parameter, public :: HYDRO_INIT_ZERO     = 0
     integer, parameter, public :: HYDRO_INIT_EXTERNAL = 1
 
     type hydro_param_class
-        integer  :: method
+        integer  :: method_til
+        integer  :: method_transport
         integer  :: init_method
         real(wp) :: dx
         real(wp) :: dy
-        real(wp) :: H_w_max
-        integer  :: mask_bc          ! see bucket::BC_BORDER_* (applies to BUCKET and K24)
-        real(wp) :: H_w_bc             ! [m] imposed H_w at the domain border (BC_BORDER_IMPOSED)
+        real(wp) :: W_til_max         ! [m]  scalar default for hyd%now%W_til_max
+        integer  :: mask_bc           ! see bucket::MASK_BC_*
+        real(wp) :: W_til_bc          ! [m]  imposed W_til at the domain border (MASK_BC_IMPOSED)
         type(bucket_param_class)  :: bucket
         type(k24_param_class)     :: k24
         type(closure_param_class) :: closures
@@ -59,13 +69,15 @@ module fast_hydrology
         real(wp) :: time
         real(wp) :: dt
         logical  :: initialized
-        real(wp), allocatable :: H_w(:,:)    ! [m] basal water storage column (BUCKET); unused by K24
-        real(wp), allocatable :: dHwdt(:,:)
-        real(wp), allocatable :: W(:,:)      ! [m] K24 distributed sheet water-layer thickness; 0 for BUCKET
-        real(wp), allocatable :: p_w(:,:)
-        real(wp), allocatable :: q_x(:,:)
+        real(wp), allocatable :: W_til(:,:)        ! [m]      till storage (bucket)
+        real(wp), allocatable :: W_til_max(:,:)    ! [m]      per-cell cap (defaults to par%W_til_max)
+        real(wp), allocatable :: dW_til_dt(:,:)    ! [m/a]    natural-sign change in W_til over the step
+        real(wp), allocatable :: overflow(:,:)     ! [m/a]    till-saturation spill -> K24 source
+        real(wp), allocatable :: W(:,:)            ! [m]      K24 distributed sheet thickness; 0 when TRANSPORT_NONE
+        real(wp), allocatable :: p_w(:,:)          ! [Pa]
+        real(wp), allocatable :: q_x(:,:)          ! [m2/a today; m2/s after Commit 2]
         real(wp), allocatable :: q_y(:,:)
-        real(wp), allocatable :: N(:,:)
+        real(wp), allocatable :: N(:,:)            ! [Pa]
         real(wp), allocatable :: kappa(:,:)
     end type
 
@@ -79,7 +91,6 @@ module fast_hydrology
     public :: hydro_init
     public :: hydro_init_state
     public :: hydro_update
-    public :: relax_H_w
     public :: wp
 
 contains
@@ -105,7 +116,8 @@ contains
         call hydro_par_load(hyd%par, filename, nml_group)
 
         if (hyd%par%dx /= hyd%par%dy) then
-            write(*,*) "hydro_init:: error: K24 requires dx == dy."
+            write(*,*) "hydro_init:: error: K24 currently requires dx == dy."
+            write(*,*) "(Anisotropic grid support arrives in Commit 2.)"
             write(*,*) "dx = ", hyd%par%dx, "  dy = ", hyd%par%dy
             stop
         end if
@@ -122,9 +134,12 @@ contains
 
     subroutine hydro_init_state(hyd, z_bed, f_ice, f_grnd, time)
         ! Initialize state for the first update. Kappa is filled only when
-        ! method = K24. H_w is set according to par%init_method on grounded
-        ! cells; the floating + adjacent-to-floating override is always
-        ! applied. Diagnostic fields are zeroed.
+        ! method_transport == K24. W_til is set according to par%init_method
+        ! on grounded cells; the floating + adjacent-to-floating override is
+        ! applied for TIL_BUCKET. Per-cell W_til_max is filled from
+        ! par%W_til_max (host can overwrite hyd%now%W_til_max(:,:) between
+        ! init and the first update if it wants a spatial cap). Diagnostic
+        ! fields are zeroed.
 
         implicit none
 
@@ -140,7 +155,7 @@ contains
         nx = size(z_bed,1)
         ny = size(z_bed,2)
 
-        if (hyd%par%method == HYDRO_METHOD_K24) then
+        if (hyd%par%method_transport == TRANSPORT_K24) then
             allocate(z_bed_dp(nx,ny), kappa_dp(nx,ny))
             z_bed_dp = real(z_bed, dp)
             call initialize_kappa(kappa_dp, z_bed_dp, hyd%par%k24%substrate_type)
@@ -150,11 +165,16 @@ contains
             hyd%now%kappa = 0.0_wp
         end if
 
+        ! Per-cell W_til_max defaults to the scalar parameter. Host can
+        ! overwrite the array between init and the first update if a
+        ! spatial cap is needed.
+        hyd%now%W_til_max = hyd%par%W_til_max
+
         select case (hyd%par%init_method)
             case (HYDRO_INIT_ZERO)
-                hyd%now%H_w = 0.0_wp
+                hyd%now%W_til = 0.0_wp
             case (HYDRO_INIT_EXTERNAL)
-                ! Leave H_w untouched on grounded cells (host filled it)
+                ! Leave W_til untouched (host filled it)
                 continue
             case default
                 write(*,*) "hydro_init_state:: error: init_method must be 0 or 1."
@@ -162,19 +182,21 @@ contains
                 stop
         end select
 
-        ! Zero H_w outside the active (grounded ice) set, then apply the
-        ! configurable domain-border BC. H_w is only meaningful for BUCKET;
-        ! K24 uses W instead, so this is mostly a no-op for K24 but keeps
-        ! the init state tidy.
-        call apply_floating_override(hyd%now%H_w, f_ice, f_grnd)
-        call apply_mask_bc(hyd%now%H_w, hyd%par%mask_bc, hyd%par%H_w_bc)
+        ! Zero W_til outside the active (grounded ice) set and apply the
+        ! configurable domain-border BC. Skipped for TIL_EXTERNAL (host
+        ! manages W_til including overrides).
+        if (hyd%par%method_til == TIL_BUCKET) then
+            call apply_floating_override(hyd%now%W_til, f_ice, f_grnd)
+            call apply_mask_bc(hyd%now%W_til, hyd%par%mask_bc, hyd%par%W_til_bc)
+        end if
 
-        hyd%now%dHwdt = 0.0_wp
-        hyd%now%W     = 0.0_wp
-        hyd%now%p_w   = 0.0_wp
-        hyd%now%q_x   = 0.0_wp
-        hyd%now%q_y   = 0.0_wp
-        hyd%now%N     = 0.0_wp
+        hyd%now%dW_til_dt = 0.0_wp
+        hyd%now%overflow  = 0.0_wp
+        hyd%now%W         = 0.0_wp
+        hyd%now%p_w       = 0.0_wp
+        hyd%now%q_x       = 0.0_wp
+        hyd%now%q_y       = 0.0_wp
+        hyd%now%N         = 0.0_wp
 
         hyd%now%time        = time
         hyd%now%dt          = 0.0_wp
@@ -185,7 +207,20 @@ contains
     end subroutine hydro_init_state
 
     subroutine hydro_update(hyd, H_ice, z_bed, z_sl, f_ice, f_grnd, mask, &
-                            bmb_w, uxy_b, A_glen, time)
+                            mdot, uxy_b, A_glen, time)
+        ! Advance one step. Flow:
+        !   1. Till step (method_til):
+        !        BUCKET   -> updates W_til; produces hyd%now%overflow
+        !        EXTERNAL -> leaves W_til alone; overflow = mdot
+        !   2. Transport step (method_transport):
+        !        NONE -> W, q_x, q_y zeroed
+        !        K24  -> calc_k24 with source = hyd%now%overflow,
+        !                writes W, q_x, q_y, N, p_w
+        !   3. N closure:
+        !        K24 active -> N already set by K24 (skip)
+        !        otherwise  -> apply par%bucket%N_closure on the current W_til
+        !   4. W_til overrides (BUCKET only): floating + mask-BC.
+        !   5. dW_til_dt = (W_til_new - W_til_old) / dt.
 
         implicit none
 
@@ -196,18 +231,18 @@ contains
         real(wp),          intent(IN)    :: f_ice(:,:)
         real(wp),          intent(IN)    :: f_grnd(:,:)
         real(wp),          intent(IN)    :: mask(:,:)
-        real(wp),          intent(IN)    :: bmb_w(:,:)
+        real(wp),          intent(IN)    :: mdot(:,:)
         real(wp),          intent(IN)    :: uxy_b(:,:)
         real(wp),          intent(IN)    :: A_glen(:,:)
         real(wp),          intent(IN)    :: time
 
         ! dp scratch arrays for the K24 boundary
         real(dp), allocatable :: H_ice_dp(:,:), z_bed_dp(:,:), mask_dp(:,:)
-        real(dp), allocatable :: bmb_w_dp(:,:), uxy_b_dp(:,:), A_glen_dp(:,:)
+        real(dp), allocatable :: src_dp(:,:), uxy_b_dp(:,:), A_glen_dp(:,:)
         real(dp), allocatable :: kappa_dp(:,:)
         real(dp), allocatable :: q_x_dp(:,:), q_y_dp(:,:), N_dp(:,:), p_w_dp(:,:), W_dp(:,:)
 
-        real(wp), allocatable :: H_w_old(:,:)
+        real(wp), allocatable :: W_til_old(:,:)
         real(wp) :: dt_step
         integer  :: nx, ny
 
@@ -219,47 +254,62 @@ contains
         nx = size(H_ice,1)
         ny = size(H_ice,2)
 
-        allocate(H_w_old(nx,ny))
-        H_w_old = hyd%now%H_w
+        allocate(W_til_old(nx,ny))
+        W_til_old = hyd%now%W_til
 
         dt_step      = max(time - hyd%now%time, 0.0_wp)
         hyd%now%time = time
         hyd%now%dt   = dt_step
 
-        select case (hyd%par%method)
+        ! ---- Step 1: till update (W_til + overflow) ----
+        if (dt_step > 0.0_wp) then
+            select case (hyd%par%method_til)
 
-            case (HYDRO_METHOD_EXTERNAL)
-                ! Host owns H_w; we only derive N and p_w from the
-                ! configured N closure operating on the caller's H_w.
-                call apply_N_closure(hyd, H_ice, z_bed, z_sl, f_ice, f_grnd)
+                case (TIL_BUCKET)
+                    call calc_bucket(hyd%now%W_til, hyd%now%overflow, &
+                                     f_ice, f_grnd, mask, mdot, &
+                                     dt_step, hyd%par%bucket, hyd%now%W_til_max)
 
-            case (HYDRO_METHOD_NONE)
-                continue
+                case (TIL_EXTERNAL)
+                    ! Host owns W_til; do not touch it. K24 sees raw source.
+                    hyd%now%overflow = mdot
 
-            case (HYDRO_METHOD_BUCKET)
-                if (dt_step > 0.0_wp) then
-                    call calc_bucket(hyd%now%H_w, f_ice, f_grnd, mask, bmb_w, &
-                                     dt_step, hyd%par%bucket, hyd%par%H_w_max)
-                end if
-                call apply_N_closure(hyd, H_ice, z_bed, z_sl, f_ice, f_grnd)
+                case default
+                    write(*,*) "hydro_update:: error: method_til must be 0 (BUCKET) or 1 (EXTERNAL)."
+                    write(*,*) "method_til = ", hyd%par%method_til
+                    stop
 
-            case (HYDRO_METHOD_K24)
+            end select
+        else
+            ! dt = 0: no step. Overflow is zero by convention.
+            hyd%now%overflow = 0.0_wp
+        end if
+
+        ! ---- Step 2: transport (W, q_x, q_y) ----
+        select case (hyd%par%method_transport)
+
+            case (TRANSPORT_NONE)
+                hyd%now%W   = 0.0_wp
+                hyd%now%q_x = 0.0_wp
+                hyd%now%q_y = 0.0_wp
+
+            case (TRANSPORT_K24)
                 if (dt_step > 0.0_wp) then
                     allocate(H_ice_dp(nx,ny), z_bed_dp(nx,ny), mask_dp(nx,ny))
-                    allocate(bmb_w_dp(nx,ny), uxy_b_dp(nx,ny), A_glen_dp(nx,ny))
+                    allocate(src_dp(nx,ny), uxy_b_dp(nx,ny), A_glen_dp(nx,ny))
                     allocate(kappa_dp(nx,ny))
                     allocate(q_x_dp(nx,ny), q_y_dp(nx,ny), N_dp(nx,ny), p_w_dp(nx,ny), W_dp(nx,ny))
 
-                    H_ice_dp  = real(H_ice,         dp)
-                    z_bed_dp  = real(z_bed,         dp)
-                    mask_dp   = real(mask,          dp)
-                    bmb_w_dp  = real(bmb_w,         dp)
-                    uxy_b_dp  = real(uxy_b,         dp)
-                    A_glen_dp = real(A_glen,        dp)
-                    kappa_dp  = real(hyd%now%kappa, dp)
+                    H_ice_dp  = real(H_ice,           dp)
+                    z_bed_dp  = real(z_bed,           dp)
+                    mask_dp   = real(mask,            dp)
+                    src_dp    = real(hyd%now%overflow,dp)
+                    uxy_b_dp  = real(uxy_b,           dp)
+                    A_glen_dp = real(A_glen,          dp)
+                    kappa_dp  = real(hyd%now%kappa,   dp)
 
                     call calc_k24(q_x_dp, q_y_dp, N_dp, p_w_dp, W_dp, &
-                                  H_ice_dp, z_bed_dp, mask_dp, bmb_w_dp, uxy_b_dp, A_glen_dp, &
+                                  H_ice_dp, z_bed_dp, mask_dp, src_dp, uxy_b_dp, A_glen_dp, &
                                   kappa_dp, &
                                   real(hyd%par%dx, dp), hyd%par%k24)
 
@@ -268,79 +318,49 @@ contains
                     hyd%now%N   = real(N_dp,   wp)
                     hyd%now%p_w = real(p_w_dp, wp)
                     hyd%now%W   = real(W_dp,   wp)
-                    ! K24 leaves H_w untouched -- H_w is reserved for storage-style
-                    ! methods (BUCKET). K24's sheet-thickness diagnostic is W.
 
                     deallocate(H_ice_dp, z_bed_dp, mask_dp)
-                    deallocate(bmb_w_dp, uxy_b_dp, A_glen_dp)
+                    deallocate(src_dp, uxy_b_dp, A_glen_dp)
                     deallocate(kappa_dp)
                     deallocate(q_x_dp, q_y_dp, N_dp, p_w_dp, W_dp)
                 end if
 
             case default
-                write(*,*) "hydro_update:: error: method must be one of [-1,0,1,2]."
-                write(*,*) "method = ", hyd%par%method
+                write(*,*) "hydro_update:: error: method_transport must be 0 (NONE) or 1 (K24)."
+                write(*,*) "method_transport = ", hyd%par%method_transport
                 stop
 
         end select
 
-        ! Post-step H_w overrides apply only to BUCKET (the only method that
-        ! writes H_w). K24 leaves H_w untouched -- its diagnostic sheet
-        ! thickness lives in hyd%now%W instead. NONE and EXTERNAL also leave
-        ! H_w alone.
-        ! Order:
-        !   1. zero H_w outside the active grounded-ice set
-        !      (f_grnd > 0 .and. f_ice > 0).
-        !   2. domain-border BC -- final pass on the i=1, i=nx, j=1, j=ny rim.
-        if (hyd%par%method == HYDRO_METHOD_BUCKET .and. dt_step > 0.0_wp) then
-            call apply_floating_override(hyd%now%H_w, f_ice, f_grnd)
-            call apply_mask_bc(hyd%now%H_w, hyd%par%mask_bc, hyd%par%H_w_bc)
+        ! ---- Step 3: N closure ----
+        ! K24 produces N on its own; in all other cases run the configured
+        ! N-closure on the current W_til (and geometry).
+        if (hyd%par%method_transport /= TRANSPORT_K24) then
+            call apply_N_closure(hyd, H_ice, z_bed, z_sl, f_ice, f_grnd)
         end if
 
+        ! ---- Step 4: W_til overrides ----
+        if (hyd%par%method_til == TIL_BUCKET .and. dt_step > 0.0_wp) then
+            call apply_floating_override(hyd%now%W_til, f_ice, f_grnd)
+            call apply_mask_bc(hyd%now%W_til, hyd%par%mask_bc, hyd%par%W_til_bc)
+        end if
+
+        ! ---- Step 5: dW_til_dt ----
         if (dt_step > 0.0_wp) then
-            hyd%now%dHwdt = (hyd%now%H_w - H_w_old) / dt_step
+            hyd%now%dW_til_dt = (hyd%now%W_til - W_til_old) / dt_step
         else
-            hyd%now%dHwdt = 0.0_wp
+            hyd%now%dW_til_dt = 0.0_wp
         end if
 
-        deallocate(H_w_old)
+        deallocate(W_til_old)
 
         return
 
     end subroutine hydro_update
 
     ! ------------------------------------------------------------
-    ! Update H_w in place toward the equilibrium H_w_eq:
-    !   tau <= 0 : instantaneous  ( H_w := H_w_eq )
-    !   tau >  0 : exponential    ( H_w := H_w + (H_w_eq - H_w) *
-    !                                       (1 - exp(-dt/tau)) )
-    ! Elemental so callers can pass scalars or conformable arrays.
-    ! Intended for hosts (e.g. yelmo) that own their own H_w field and
-    ! want to evolve it toward the equilibrium produced by K24
-    ! (hyd%now%H_w with method = HYDRO_METHOD_K24).
-    ! ------------------------------------------------------------
-    elemental subroutine relax_H_w(H_w, H_w_eq, tau, dt)
-
-        implicit none
-
-        real(wp), intent(INOUT) :: H_w
-        real(wp), intent(IN)    :: H_w_eq
-        real(wp), intent(IN)    :: tau
-        real(wp), intent(IN)    :: dt
-
-        if (tau <= 0.0_wp) then
-            H_w = H_w_eq
-        else
-            H_w = H_w + (H_w_eq - H_w) * (1.0_wp - exp(-dt / tau))
-        end if
-
-        return
-
-    end subroutine relax_H_w
-
-    ! ------------------------------------------------------------
-    ! N-closure post-step for BUCKET mode. Writes hyd%now%N and derives
-    ! p_w = Po - N. No-op when par%bucket%N_closure == N_CLOSURE_NONE.
+    ! N-closure post-step. Writes hyd%now%N and derives p_w = Po - N.
+    ! Called when method_transport /= K24. No-op when N_closure == NONE.
     ! ------------------------------------------------------------
     subroutine apply_N_closure(hyd, H_ice, z_bed, z_sl, f_ice, f_grnd)
 
@@ -386,8 +406,8 @@ contains
                 !$omp parallel do default(shared) private(i,j) schedule(static)
                 do j = 1, ny
                 do i = 1, nx
-                    call hydro_calc_N_till(hyd%now%N(i,j), hyd%now%H_w(i,j), H_ice(i,j), &
-                                           f_ice(i,j), f_grnd(i,j), hyd%par%H_w_max, &
+                    call hydro_calc_N_till(hyd%now%N(i,j), hyd%now%W_til(i,j), H_ice(i,j), &
+                                           f_ice(i,j), f_grnd(i,j), hyd%now%W_til_max(i,j), &
                                            hyd%par%closures%till%N0, hyd%par%closures%till%delta, &
                                            hyd%par%closures%till%e0, hyd%par%closures%till%Cc, &
                                            hyd%par%closures%rho_ice, hyd%par%closures%g)
@@ -441,21 +461,23 @@ contains
         init_pars = .FALSE.
         if (present(init)) init_pars = init
 
-        par%method         = HYDRO_METHOD_NONE
-        par%init_method    = HYDRO_INIT_ZERO
-        par%dx             = 0.0_wp
-        par%dy             = 0.0_wp
-        par%H_w_max        = 2.0_wp
-        par%mask_bc      = MASK_BC_ZERO
-        par%H_w_bc         = 0.0_wp
+        par%method_til       = TIL_BUCKET
+        par%method_transport = TRANSPORT_NONE
+        par%init_method      = HYDRO_INIT_ZERO
+        par%dx               = 0.0_wp
+        par%dy               = 0.0_wp
+        par%W_til_max        = 2.0_wp
+        par%mask_bc          = MASK_BC_ZERO
+        par%W_til_bc         = 0.0_wp
 
-        call nml_read(filename,group,"method",         par%method,         init=init_pars)
-        call nml_read(filename,group,"init_method",    par%init_method,    init=init_pars)
-        call nml_read(filename,group,"dx",             par%dx,             init=init_pars)
-        call nml_read(filename,group,"dy",             par%dy,             init=init_pars)
-        call nml_read(filename,group,"H_w_max",        par%H_w_max,        init=init_pars)
-        call nml_read(filename,group,"mask_bc",        par%mask_bc,        init=init_pars)
-        call nml_read(filename,group,"H_w_bc",         par%H_w_bc,         init=init_pars)
+        call nml_read(filename,group,"method_til",        par%method_til,        init=init_pars)
+        call nml_read(filename,group,"method_transport",  par%method_transport,  init=init_pars)
+        call nml_read(filename,group,"init_method",       par%init_method,       init=init_pars)
+        call nml_read(filename,group,"dx",                par%dx,                init=init_pars)
+        call nml_read(filename,group,"dy",                par%dy,                init=init_pars)
+        call nml_read(filename,group,"W_til_max",         par%W_til_max,         init=init_pars)
+        call nml_read(filename,group,"mask_bc",           par%mask_bc,           init=init_pars)
+        call nml_read(filename,group,"W_til_bc",          par%W_til_bc,          init=init_pars)
 
         call bucket_par_load (par%bucket,   filename, group, init=init_pars)
         call k24_par_load    (par%k24,      filename, group, init=init_pars)
@@ -474,8 +496,10 @@ contains
 
         call hydro_deallocate(now)
 
-        allocate(now%H_w(nx,ny))
-        allocate(now%dHwdt(nx,ny))
+        allocate(now%W_til(nx,ny))
+        allocate(now%W_til_max(nx,ny))
+        allocate(now%dW_til_dt(nx,ny))
+        allocate(now%overflow(nx,ny))
         allocate(now%W(nx,ny))
         allocate(now%p_w(nx,ny))
         allocate(now%q_x(nx,ny))
@@ -483,14 +507,16 @@ contains
         allocate(now%N(nx,ny))
         allocate(now%kappa(nx,ny))
 
-        now%H_w   = 0.0_wp
-        now%dHwdt = 0.0_wp
-        now%W     = 0.0_wp
-        now%p_w   = 0.0_wp
-        now%q_x   = 0.0_wp
-        now%q_y   = 0.0_wp
-        now%N     = 0.0_wp
-        now%kappa = 0.0_wp
+        now%W_til     = 0.0_wp
+        now%W_til_max = 0.0_wp
+        now%dW_til_dt = 0.0_wp
+        now%overflow  = 0.0_wp
+        now%W         = 0.0_wp
+        now%p_w       = 0.0_wp
+        now%q_x       = 0.0_wp
+        now%q_y       = 0.0_wp
+        now%N         = 0.0_wp
+        now%kappa     = 0.0_wp
 
         return
 
@@ -502,14 +528,16 @@ contains
 
         type(hydro_state_class), intent(INOUT) :: now
 
-        if (allocated(now%H_w))   deallocate(now%H_w)
-        if (allocated(now%dHwdt)) deallocate(now%dHwdt)
-        if (allocated(now%W))     deallocate(now%W)
-        if (allocated(now%p_w))   deallocate(now%p_w)
-        if (allocated(now%q_x))   deallocate(now%q_x)
-        if (allocated(now%q_y))   deallocate(now%q_y)
-        if (allocated(now%N))     deallocate(now%N)
-        if (allocated(now%kappa)) deallocate(now%kappa)
+        if (allocated(now%W_til))     deallocate(now%W_til)
+        if (allocated(now%W_til_max)) deallocate(now%W_til_max)
+        if (allocated(now%dW_til_dt)) deallocate(now%dW_til_dt)
+        if (allocated(now%overflow))  deallocate(now%overflow)
+        if (allocated(now%W))         deallocate(now%W)
+        if (allocated(now%p_w))       deallocate(now%p_w)
+        if (allocated(now%q_x))       deallocate(now%q_x)
+        if (allocated(now%q_y))       deallocate(now%q_y)
+        if (allocated(now%N))         deallocate(now%N)
+        if (allocated(now%kappa))     deallocate(now%kappa)
 
         return
 

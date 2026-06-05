@@ -1,8 +1,8 @@
 program greenland
     ! Load a Yelmo Greenland-16km restart file, run the FastHydrology
-    ! library to a steady-state H_w field with either BUCKET or K24, and
-    ! write a NetCDF output. Configured via a namelist that points at the
-    ! restart and selects par%method.
+    ! library to a steady-state W_til / W field, and write a NetCDF output.
+    ! Configured via a namelist that points at the restart and selects
+    ! par%method_til + par%method_transport.
 
     use nml
     use ncio
@@ -20,7 +20,7 @@ program greenland
     real(wp_local), allocatable :: H_ice(:,:), z_bed(:,:), z_srf(:,:), z_sl(:,:)
     real(wp_local), allocatable :: f_ice(:,:), f_grnd(:,:), mask(:,:)
     real(wp_local), allocatable :: bmb_grnd(:,:), uxy_b(:,:), A_glen(:,:)
-    real(wp_local), allocatable :: bmb_w(:,:)
+    real(wp_local), allocatable :: mdot(:,:)
 
     type(hydro_class) :: hyd
     real(wp_local)    :: time, dx_km, dy_km
@@ -52,7 +52,7 @@ program greenland
     allocate(H_ice(nx,ny), z_bed(nx,ny), z_srf(nx,ny), z_sl(nx,ny))
     allocate(f_ice(nx,ny), f_grnd(nx,ny), mask(nx,ny))
     allocate(bmb_grnd(nx,ny), uxy_b(nx,ny), A_glen(nx,ny))
-    allocate(bmb_w(nx,ny))
+    allocate(mdot(nx,ny))
 
     call nc_read(restart_file, "xc",       xc)
     call nc_read(restart_file, "yc",       yc)
@@ -68,9 +68,11 @@ program greenland
     call nc_read(restart_file, "bmb_grnd", bmb_grnd, start=[1,1,1], count=[nx,ny,1])
 
     ! Convert bmb_grnd (ice-equivalent, sign convention: positive = melt) to
-    ! water-equivalent (m/a) for the library: bmb_w = -bmb_grnd * (rho_ice/rho_w).
+    ! a water-equivalent source rate (m/a) for the library:
+    !   mdot = -bmb_grnd * (rho_ice / rho_w).
     ! Yelmo's sign convention has bmb_grnd negative when melting; flip it.
-    bmb_w = -bmb_grnd * (917.0_wp_local / 1000.0_wp_local)
+    ! (Units stay m/a until Commit 2 switches the internals to SI.)
+    mdot = -bmb_grnd * (917.0_wp_local / 1000.0_wp_local)
 
     ! Build mask: K24 / BUCKET active where grounded ice exists.
     where (f_grnd > 0.0_wp_local .and. f_ice > 0.0_wp_local)
@@ -90,10 +92,11 @@ program greenland
     hyd%par%dy = dy_km * 1000.0_wp_local
     call hydro_init_state(hyd, z_bed, f_ice, f_grnd, 0.0_wp_local)
 
-    write(*,'(a,i0,a)') "  method  = ", hyd%par%method, " (-1=EXTERNAL 0=NONE 1=BUCKET 2=K24)"
-    write(*,'(a,i0)')   "  N_clos  = ", hyd%par%bucket%N_closure
-    write(*,'(a,i0)')   "  mask_bc = ", hyd%par%mask_bc
-    write(*,'(a,es12.3,a)') "  bmb_max = ", maxval(bmb_w), " m/a (water equiv.)"
+    write(*,'(a,i0,a)') "  method_til       = ", hyd%par%method_til, " (0=BUCKET 1=EXTERNAL)"
+    write(*,'(a,i0,a)') "  method_transport = ", hyd%par%method_transport, " (0=NONE 1=K24)"
+    write(*,'(a,i0)')   "  N_clos           = ", hyd%par%bucket%N_closure
+    write(*,'(a,i0)')   "  mask_bc          = ", hyd%par%mask_bc
+    write(*,'(a,es12.3,a)') "  mdot_max         = ", maxval(mdot), " m/a (water equiv.)"
 
     ! ---- Output ----
     call output_init(out_file, xc, yc)
@@ -106,29 +109,29 @@ program greenland
     n_out  = max(1, nint(dt_out / dt_step))
 
     write(*,'(a)') ""
-    if (hyd%par%method == 2) then
+    if (hyd%par%method_transport == 1) then
         write(*,'(a)') "       time        W_max       W_mean       N_max      N_mean"
     else
-        write(*,'(a)') "       time      H_w_max     H_w_mean       N_max      N_mean"
+        write(*,'(a)') "       time    W_til_max   W_til_mean       N_max      N_mean"
     end if
 
     do while (time < t_end - 0.5_wp_local*dt_step)
         time   = time + dt_step
         n_step = n_step + 1
         call hydro_update(hyd, H_ice, z_bed, z_sl, f_ice, f_grnd, mask, &
-                          bmb_w, uxy_b, A_glen, time)
+                          mdot, uxy_b, A_glen, time)
 
         if (mod(n_step, n_out) == 0 .or. time >= t_end) then
             i_out = i_out + 1
             call output_step(out_file, hyd, time, i_out)
-            if (hyd%par%method == 2) then
+            if (hyd%par%method_transport == 1) then
                 write(*,'(f12.4, 4es13.4)') time, &
-                    maxval(hyd%now%W), sum(hyd%now%W * mask) / max(1.0_wp_local, sum(mask)), &
-                    maxval(hyd%now%N), sum(hyd%now%N * mask) / max(1.0_wp_local, sum(mask))
+                    maxval(hyd%now%W),     sum(hyd%now%W     * mask) / max(1.0_wp_local, sum(mask)), &
+                    maxval(hyd%now%N),     sum(hyd%now%N     * mask) / max(1.0_wp_local, sum(mask))
             else
                 write(*,'(f12.4, 4es13.4)') time, &
-                    maxval(hyd%now%H_w), sum(hyd%now%H_w * mask) / max(1.0_wp_local, sum(mask)), &
-                    maxval(hyd%now%N),   sum(hyd%now%N   * mask) / max(1.0_wp_local, sum(mask))
+                    maxval(hyd%now%W_til), sum(hyd%now%W_til * mask) / max(1.0_wp_local, sum(mask)), &
+                    maxval(hyd%now%N),     sum(hyd%now%N     * mask) / max(1.0_wp_local, sum(mask))
             end if
         end if
     end do
@@ -162,20 +165,22 @@ contains
         real(wp_local),   intent(IN) :: time
         integer,          intent(IN) :: n
 
-        call nc_write(filename, "time",  time,             dim1="time", start=[n], count=[1])
-        call nc_write(filename, "H_w",   hyd%now%H_w,      dim1="xc", dim2="yc", dim3="time", &
-                      start=[1,1,n], units="m",     long_name="Basal water storage column (BUCKET)")
-        call nc_write(filename, "dHwdt", hyd%now%dHwdt,    dim1="xc", dim2="yc", dim3="time", &
-                      start=[1,1,n], units="m a-1", long_name="Rate of change of H_w")
-        call nc_write(filename, "W",     hyd%now%W,        dim1="xc", dim2="yc", dim3="time", &
+        call nc_write(filename, "time",     time,               dim1="time", start=[n], count=[1])
+        call nc_write(filename, "W_til",    hyd%now%W_til,      dim1="xc", dim2="yc", dim3="time", &
+                      start=[1,1,n], units="m",     long_name="Till water storage thickness (bucket)")
+        call nc_write(filename, "dW_til_dt",hyd%now%dW_til_dt,  dim1="xc", dim2="yc", dim3="time", &
+                      start=[1,1,n], units="m a-1", long_name="Rate of change of W_til")
+        call nc_write(filename, "overflow", hyd%now%overflow,   dim1="xc", dim2="yc", dim3="time", &
+                      start=[1,1,n], units="m a-1", long_name="Till-saturation overflow rate (bucket -> transport)")
+        call nc_write(filename, "W",        hyd%now%W,          dim1="xc", dim2="yc", dim3="time", &
                       start=[1,1,n], units="m",     long_name="Distributed sheet water-layer thickness (K24)")
-        call nc_write(filename, "N",     hyd%now%N,        dim1="xc", dim2="yc", dim3="time", &
+        call nc_write(filename, "N",        hyd%now%N,          dim1="xc", dim2="yc", dim3="time", &
                       start=[1,1,n], units="Pa",    long_name="Effective pressure")
-        call nc_write(filename, "p_w",   hyd%now%p_w,      dim1="xc", dim2="yc", dim3="time", &
+        call nc_write(filename, "p_w",      hyd%now%p_w,        dim1="xc", dim2="yc", dim3="time", &
                       start=[1,1,n], units="Pa",    long_name="Water pressure")
-        call nc_write(filename, "q_x",   hyd%now%q_x,      dim1="xc", dim2="yc", dim3="time", &
+        call nc_write(filename, "q_x",      hyd%now%q_x,        dim1="xc", dim2="yc", dim3="time", &
                       start=[1,1,n], units="m2 s-1",long_name="Water flux x-component")
-        call nc_write(filename, "q_y",   hyd%now%q_y,      dim1="xc", dim2="yc", dim3="time", &
+        call nc_write(filename, "q_y",      hyd%now%q_y,        dim1="xc", dim2="yc", dim3="time", &
                       start=[1,1,n], units="m2 s-1",long_name="Water flux y-component")
 
     end subroutine output_step

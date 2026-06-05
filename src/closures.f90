@@ -1,12 +1,13 @@
 module fast_hydrology_closures
-    ! Effective-pressure (N) closures parameterized as N = f(H_w, geometry).
+    ! Effective-pressure (N) closures parameterized as N = f(W_til, geometry).
     ! All ported from yelmo's basal_dragging.f90 with parameters re-routed
     ! into per-closure parameter sub-structs.
     !
     ! The standalone subs are public and callable regardless of the host's
-    ! choice of par%method; they take their inputs explicitly. The wrapper
-    ! (fast_hydrology) selects one of them as a post-step when
-    ! par%method = BUCKET and par%bucket%N_closure /= NONE.
+    ! choice of par%method_til / par%method_transport; they take their inputs
+    ! explicitly. The wrapper (fast_hydrology) applies one of them as a
+    ! post-step closure when method_transport /= K24 (K24 produces N on its
+    ! own and bypasses this dispatch).
 
     use nml
 
@@ -120,7 +121,7 @@ contains
     end subroutine hydro_calc_N_overburden
 
     ! ============================================================
-    ! Marine: Leguy 2014, Eq. 14 (geometry only; no H_w dependence)
+    ! Marine: Leguy 2014, Eq. 14 (geometry only; no W_til dependence)
     ! ============================================================
     elemental subroutine hydro_calc_N_marine(N, H_ice, f_ice, z_bed, z_sl, p, rho_ice, rho_sw, g)
 
@@ -150,12 +151,12 @@ contains
     ! ============================================================
     ! Till: van Pelt & Bueler 2015, Eq. 23
     ! ============================================================
-    elemental subroutine hydro_calc_N_till(N, H_w, H_ice, f_ice, f_grnd, H_w_max, &
+    elemental subroutine hydro_calc_N_till(N, W_til, H_ice, f_ice, f_grnd, W_til_max, &
                                           N0, delta, e0, Cc, rho_ice, g)
 
         real(wp), intent(OUT) :: N
-        real(wp), intent(IN)  :: H_w, H_ice, f_ice, f_grnd
-        real(wp), intent(IN)  :: H_w_max, N0, delta, e0, Cc, rho_ice, g
+        real(wp), intent(IN)  :: W_til, H_ice, f_ice, f_grnd
+        real(wp), intent(IN)  :: W_til_max, N0, delta, e0, Cc, rho_ice, g
 
         real(wp) :: H_eff, P0, s, q1
 
@@ -167,7 +168,11 @@ contains
         call calc_H_eff(H_eff, H_ice, f_ice)
 
         P0 = rho_ice * g * H_eff
-        s  = min(H_w / H_w_max, 1.0_wp)
+        if (W_til_max > 0.0_wp) then
+            s = min(W_til / W_til_max, 1.0_wp)
+        else
+            s = 1.0_wp
+        end if
         q1 = (e0 / Cc) * (1.0_wp - s)
         q1 = min(q1, 10.0_wp)
 
