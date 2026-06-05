@@ -1,14 +1,15 @@
 module fast_hydrology_bucket
     ! Local "bucket" basal-hydrology model: per-cell water mass balance with
-    ! linear till drainage and a hard cap. Ported verbatim from yelmo's
-    ! calc_basal_water_local (yelmo/src/physics/thermodynamics.f90).
+    ! linear till drainage and a hard cap. Adapted from yelmo's
+    ! calc_basal_water_local (yelmo/src/physics/thermodynamics.f90), with the
+    ! H_w_max overrides on floating / adjacent-to-floating cells removed so
+    ! the bucket and K24 methods behave comparably.
     !
-    ! Cell logic:
-    !   floating  (f_grnd == 0)                                  : H_w = H_w_max
-    !   grounded fully-ice-covered & has floating neighbor       : H_w = H_w_max
-    !   grounded ice-free (f_ice < 1)                            : H_w = 0
-    !   grounded fully-ice-covered & no floating neighbor (else) :
+    ! Cell logic (within host mask == 1):
+    !   f_grnd > 0 .and. f_ice > 0 :
     !       H_w := H_w + dt * (bmb_w - till_rate), clamped to [0, H_w_max]
+    !   otherwise (ocean / floating / grounded ice-free) :
+    !       H_w = 0
     !
     ! Host-supplied `mask` is intersected with these cases: where mask /= 1
     ! the cell is left untouched (host has decided it is outside the active
@@ -70,9 +71,10 @@ contains
     end subroutine bucket_par_load
 
     subroutine calc_bucket(H_w, f_ice, f_grnd, mask, bmb_w, dt, par, H_w_max)
-        ! Yelmo-equivalent local bucket update on grounded-ice-covered cells,
-        ! followed by the hardcoded floating-cell override (H_w = H_w_max) and
-        ! the configurable domain-border BC (par%bucket%bc_border).
+        ! Local bucket update: evolve H_w on any partially-or-fully grounded
+        ! ice cell (f_grnd > 0 .and. f_ice > 0); zero elsewhere. No H_w_max
+        ! fill on floating / adjacent-to-floating cells. Domain-border BC is
+        ! applied separately by apply_mask_bc.
 
         implicit none
 
@@ -85,34 +87,23 @@ contains
         type(bucket_param_class), intent(IN)    :: par
         real(wp),                 intent(IN)    :: H_w_max
 
-        integer :: i, j, nx, ny, im1, ip1, jm1, jp1
+        integer :: i, j, nx, ny
 
         nx = size(f_ice,1)
         ny = size(f_ice,2)
 
-        !$omp parallel do default(shared) private(i,j,im1,ip1,jm1,jp1) schedule(static)
+        !$omp parallel do default(shared) private(i,j) schedule(static)
         do j = 1, ny
         do i = 1, nx
 
             if (mask(i,j) /= 1.0_wp) cycle
 
-            im1 = max(i-1,1)
-            ip1 = min(i+1,nx)
-            jm1 = max(j-1,1)
-            jp1 = min(j+1,ny)
-
-            if (f_grnd(i,j) == 0.0_wp) then
-                H_w(i,j) = H_w_max
-            else if (f_grnd(i,j) > 0.0_wp .and. f_ice(i,j) == 1.0_wp .and. &
-                    (f_grnd(im1,j) == 0.0_wp .or. f_grnd(ip1,j) == 0.0_wp .or. &
-                     f_grnd(i,jm1) == 0.0_wp .or. f_grnd(i,jp1) == 0.0_wp) ) then
-                H_w(i,j) = H_w_max
-            else if (f_grnd(i,j) > 0.0_wp .and. f_ice(i,j) < 1.0_wp) then
-                H_w(i,j) = 0.0_wp
-            else
+            if (f_grnd(i,j) > 0.0_wp .and. f_ice(i,j) > 0.0_wp) then
                 H_w(i,j) = H_w(i,j) + dt * (bmb_w(i,j) - par%till_rate)
                 H_w(i,j) = max(H_w(i,j), 0.0_wp)
                 H_w(i,j) = min(H_w(i,j), H_w_max)
+            else
+                H_w(i,j) = 0.0_wp
             end if
 
         end do
@@ -124,68 +115,30 @@ contains
     end subroutine calc_bucket
 
     ! ------------------------------------------------------------
-    ! Init-time floating override: independent of the time-stepping bucket
-    ! call, this routine sets H_w = H_w_max on floating + adjacent-to-
-    ! floating cells, leaving all other cells untouched. Grounded ice-free
-    ! cells are also forced to H_w = 0 (matches yelmo's bucket convention).
+    ! Zero H_w on cells that are not partially-or-fully grounded ice (i.e.
+    ! ocean, floating, and grounded ice-free). The active set for both
+    ! bucket and K24 is the same: f_grnd > 0 .and. f_ice > 0. Active cells
+    ! are left untouched. No H_w_max fill is applied.
     ! ------------------------------------------------------------
-    subroutine apply_floating_override(H_w, f_ice, f_grnd, H_w_max, bucket_style)
-        ! Two flavors:
-        !
-        !   bucket_style = .true.  (yelmo bucket convention)
-        !     H_w = H_w_max on floating cells AND grounded-ice cells adjacent
-        !     to a floating neighbor. H_w = 0 on grounded ice-free cells.
-        !     The adjacent-to-floating rule represents bucket-style drainage
-        !     at the grounding line, where the local model has no horizontal
-        !     transport.
-        !
-        !   bucket_style = .false. (K24 convention)
-        !     H_w = H_w_max only on PURE open-ocean cells (f_grnd == 0 AND
-        !     f_ice == 0). Grounded-ice cells touching the grounding line
-        !     are left untouched -- K24's distributed water flux already
-        !     handles the grounding-line region correctly. Grounded ice-free
-        !     cells still set to 0 (no water on land).
+    subroutine apply_floating_override(H_w, f_ice, f_grnd)
 
         implicit none
 
         real(wp), intent(INOUT) :: H_w(:,:)
         real(wp), intent(IN)    :: f_ice(:,:)
         real(wp), intent(IN)    :: f_grnd(:,:)
-        real(wp), intent(IN)    :: H_w_max
-        logical,  intent(IN)    :: bucket_style
 
-        integer :: i, j, nx, ny, im1, ip1, jm1, jp1
+        integer :: i, j, nx, ny
 
         nx = size(f_ice,1)
         ny = size(f_ice,2)
 
-        !$omp parallel do default(shared) private(i,j,im1,ip1,jm1,jp1) schedule(static)
+        !$omp parallel do default(shared) private(i,j) schedule(static)
         do j = 1, ny
         do i = 1, nx
-
-            im1 = max(i-1,1)
-            ip1 = min(i+1,nx)
-            jm1 = max(j-1,1)
-            jp1 = min(j+1,ny)
-
-            if (bucket_style) then
-                if (f_grnd(i,j) == 0.0_wp) then
-                    H_w(i,j) = H_w_max
-                else if (f_grnd(i,j) > 0.0_wp .and. f_ice(i,j) == 1.0_wp .and. &
-                        (f_grnd(im1,j) == 0.0_wp .or. f_grnd(ip1,j) == 0.0_wp .or. &
-                         f_grnd(i,jm1) == 0.0_wp .or. f_grnd(i,jp1) == 0.0_wp) ) then
-                    H_w(i,j) = H_w_max
-                else if (f_grnd(i,j) > 0.0_wp .and. f_ice(i,j) < 1.0_wp) then
-                    H_w(i,j) = 0.0_wp
-                end if
-            else
-                if (f_grnd(i,j) == 0.0_wp .and. f_ice(i,j) == 0.0_wp) then
-                    H_w(i,j) = H_w_max
-                else if (f_grnd(i,j) > 0.0_wp .and. f_ice(i,j) < 1.0_wp) then
-                    H_w(i,j) = 0.0_wp
-                end if
+            if (.not. (f_grnd(i,j) > 0.0_wp .and. f_ice(i,j) > 0.0_wp)) then
+                H_w(i,j) = 0.0_wp
             end if
-
         end do
         end do
         !$omp end parallel do

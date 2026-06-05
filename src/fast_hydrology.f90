@@ -160,11 +160,10 @@ contains
                 stop
         end select
 
-        ! Floating-cell override (method-aware flavor) then the configurable
-        ! domain-border BC. See apply_floating_override for the bucket vs
-        ! K24 convention split.
-        call apply_floating_override(hyd%now%H_w, f_ice, f_grnd, hyd%par%H_w_max, &
-                                     bucket_style = (hyd%par%method /= HYDRO_METHOD_K24))
+        ! Zero H_w outside the active (grounded ice) set, then apply the
+        ! configurable domain-border BC. Same rule for both BUCKET and K24:
+        ! only cells with f_grnd > 0 .and. f_ice > 0 carry hydrology state.
+        call apply_floating_override(hyd%now%H_w, f_ice, f_grnd)
         call apply_mask_bc(hyd%now%H_w, hyd%par%mask_bc, hyd%par%H_w_bc)
 
         hyd%now%dHwdt = 0.0_wp
@@ -282,15 +281,14 @@ contains
         ! Post-step H_w overrides apply only to methods that *write* H_w
         ! internally (BUCKET, K24). NONE and EXTERNAL leave H_w alone.
         ! Order:
-        !   1. floating-cell override -- method-aware flavor. BUCKET uses
-        !      yelmo's adjacent-to-floating rule; K24 only saturates pure
-        !      open ocean. Cannot influence K24's next call because calc_k24
-        !      doesn't read H_w as an input.
+        !   1. zero H_w outside the active grounded-ice set (same rule for
+        !      both BUCKET and K24: f_grnd > 0 .and. f_ice > 0 is active;
+        !      everything else is set to 0). Cannot influence K24's next
+        !      call because calc_k24 doesn't read H_w as an input.
         !   2. domain-border BC -- final pass on the i=1, i=nx, j=1, j=ny rim.
         if ((hyd%par%method == HYDRO_METHOD_BUCKET .or. &
              hyd%par%method == HYDRO_METHOD_K24) .and. dt_step > 0.0_wp) then
-            call apply_floating_override(hyd%now%H_w, f_ice, f_grnd, hyd%par%H_w_max, &
-                                         bucket_style = (hyd%par%method /= HYDRO_METHOD_K24))
+            call apply_floating_override(hyd%now%H_w, f_ice, f_grnd)
             call apply_mask_bc(hyd%now%H_w, hyd%par%mask_bc, hyd%par%H_w_bc)
         end if
 
