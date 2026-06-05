@@ -1,0 +1,26 @@
+{
+    "exe_default" : "libmodel/bin/model.x",
+
+    "par_path_as_argument" : false,
+
+    "exe_aliases" :
+        {   "main" : "libmodel/bin/model.x"
+        },
+
+    "grp_aliases" : {},
+
+    "par_paths" :
+        {   "alias" : "None"
+        },
+
+    "files" :
+        ["None"],
+
+    "dir-special" :
+    {
+        "None" : "target_dir_name"
+    },
+
+    "links" :
+        []
+}

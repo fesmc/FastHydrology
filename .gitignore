@@ -5,6 +5,7 @@ output/
 .DS_Store
 .install.sh
 .upgrade.sh
+.runme/config.toml
 fesm-utils
 
 
