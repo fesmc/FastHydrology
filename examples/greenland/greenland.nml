@@ -1,6 +1,6 @@
 &greenland
     restart_file = "input/GRL-16KM_yelmo_restart.nc"
-    out_file     = "greenland.nc"
+    out_file     = "hydro.nc"
     t_end        = 1000.0
     dt_step      = 0.5
     dt_out       = 100.0

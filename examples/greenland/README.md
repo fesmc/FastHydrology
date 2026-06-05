@@ -22,7 +22,7 @@ runme -r -e greenland -n examples/greenland/greenland.nml -o output/greenland
 `runme` stages a clean rundir at `output/greenland/`, copies in the
 namelist + executable, symlinks `input/` (so the restart file is
 reachable), and runs the executable from that directory. Output ends up
-at `output/greenland/greenland.nc`.
+at `output/greenland/hydro.nc`.
 
 Permute by hand without storing extra namelist files: edit the in-tree
 `greenland.nml` between runs, point each at a different `-o` rundir,
@@ -49,12 +49,12 @@ ln -sf ../../input input
 ../../bin/greenland.x ../../examples/greenland/greenland.nml
 ```
 
-The example writes `greenland.nc` (and reads `input/GRL-16KM_yelmo_restart.nc`)
+The example writes `hydro.nc` (and reads `input/GRL-16KM_yelmo_restart.nc`)
 relative to the current working directory.
 
 ## Output
 
-`greenland.nc` contains the final timestep stack of `W_til, dW_til_dt,
+`hydro.nc` contains the final timestep stack of `W_til, dW_til_dt,
 overflow, W, N, p_w, q_x, q_y` on the yelmo `(xc, yc, time)` grid. The
 diagnostic line printed each output step shows:
 
@@ -93,8 +93,8 @@ different `method_transport`), then plot:
 julia --project=examples/greenland examples/greenland/plot_greenland.jl
 ```
 
-The plotter defaults to `output/greenland_bucket/greenland.nc` and
-`output/greenland_k24/greenland.nc` (the rundirs produced by the
+The plotter defaults to `output/greenland_bucket/hydro.nc` and
+`output/greenland_k24/hydro.nc` (the rundirs produced by the
 example commands above). Override the filenames as positional args.
 Writes `output/greenland_compare.png`.
 

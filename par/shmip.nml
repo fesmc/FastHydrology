@@ -1,6 +1,6 @@
 &shmip
     case          = "B3"
-    out_file      = "output/shmip.nc"
+    out_file      = "hydro.nc"
     nx            = 64
     ny            = 16
     t_start       = 0.0

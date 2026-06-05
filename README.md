@@ -60,7 +60,7 @@ runme -r -e greenland -n examples/greenland/greenland.nml -o output/greenland
 
 `runme` stages a clean rundir at `output/greenland/`, symlinks `input/`
 for the restart file, and runs the executable from there. Output ends
-up at `output/greenland/greenland.nc` with all eight fields (`W_til,
+up at `output/greenland/hydro.nc` with all eight fields (`W_til,
 dW_til_dt, overflow, W, N, p_w, q_x, q_y`) on the yelmo `(xc, yc, time)`
 grid. Permute configurations by editing the in-tree namelist's
 `method_til` / `method_transport` switches between `runme` invocations,
