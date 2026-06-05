@@ -1,8 +1,9 @@
 program greenland
     ! Load a Yelmo Greenland-16km restart file, run the FastHydrology
     ! library to a steady-state W_til / W field, and write a NetCDF output.
-    ! Configured via a namelist that points at the restart and selects
-    ! par%method_til + par%method_transport.
+    ! Configured via examples/greenland/greenland.nml. Toggle
+    ! method_til / method_transport (and out_file) in the namelist between
+    ! runs to permute configurations.
 
     use nml
     use ncio
@@ -109,11 +110,8 @@ program greenland
     n_out  = max(1, nint(dt_out / dt_step))
 
     write(*,'(a)') ""
-    if (hyd%par%method_transport == 1) then
-        write(*,'(a)') "       time        W_max       W_mean       N_max      N_mean"
-    else
-        write(*,'(a)') "       time    W_til_max   W_til_mean       N_max      N_mean"
-    end if
+    write(*,'(a)') &
+        "       time  W_til_mean       W_mean    overflow       N_mean"
 
     do while (time < t_end - 0.5_wp_local*dt_step)
         time   = time + dt_step
@@ -124,15 +122,11 @@ program greenland
         if (mod(n_step, n_out) == 0 .or. time >= t_end) then
             i_out = i_out + 1
             call output_step(out_file, hyd, time, i_out)
-            if (hyd%par%method_transport == 1) then
-                write(*,'(f12.4, 4es13.4)') time, &
-                    maxval(hyd%now%W),     sum(hyd%now%W     * mask) / max(1.0_wp_local, sum(mask)), &
-                    maxval(hyd%now%N),     sum(hyd%now%N     * mask) / max(1.0_wp_local, sum(mask))
-            else
-                write(*,'(f12.4, 4es13.4)') time, &
-                    maxval(hyd%now%W_til), sum(hyd%now%W_til * mask) / max(1.0_wp_local, sum(mask)), &
-                    maxval(hyd%now%N),     sum(hyd%now%N     * mask) / max(1.0_wp_local, sum(mask))
-            end if
+            write(*,'(f12.4, 4es13.4)') time, &
+                sum(hyd%now%W_til    * mask) / max(1.0_wp_local, sum(mask)), &
+                sum(hyd%now%W        * mask) / max(1.0_wp_local, sum(mask)), &
+                sum(hyd%now%overflow * mask) / max(1.0_wp_local, sum(mask)), &
+                sum(hyd%now%N        * mask) / max(1.0_wp_local, sum(mask))
         end if
     end do
 

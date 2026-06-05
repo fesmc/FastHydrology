@@ -1,6 +1,6 @@
 &greenland
     restart_file = "input/GRL-16KM_yelmo_restart.nc"
-    out_file     = "output/greenland_k24.nc"
+    out_file     = "output/greenland.nc"
     t_end        = 1000.0
     dt_step      = 0.5
     dt_out       = 100.0
@@ -11,11 +11,11 @@
     method_til         = 0        ! 0=BUCKET 1=EXTERNAL
     method_transport   = 1        ! 0=NONE 1=K24
     init_method        = 0        ! 0=ZERO 1=EXTERNAL
-    dx                 = 0.0
-    dy                 = 0.0
-    W_til_max          = 2.0
+    dx                 = 0.0      ! [m] overwritten by driver
+    dy                 = 0.0      ! [m] overwritten by driver
+    W_til_max          = 2.0      ! [m]  scalar default for hyd%now%W_til_max
     mask_bc            = 0        ! 0=ZERO 1=IMPOSED 2=MIRROR
-    W_til_bc           = 0.0
+    W_til_bc           = 0.0      ! [m]  imposed W_til at the domain border (mask_bc=1)
 
     ! ---- bucket (bkt_) ----
     bkt_till_rate = 1.0e-3        ! [m/a] background till drainage (converted to m/s internally)

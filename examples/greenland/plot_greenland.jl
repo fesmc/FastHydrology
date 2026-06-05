@@ -1,6 +1,10 @@
-# Plot Greenland-example output: side-by-side comparison of BUCKET vs K24
-# W_til, N, p_w, and water flux magnitude. Reads the two NetCDF files
-# written by examples/greenland/greenland.x.
+# Plot Greenland-example output: side-by-side comparison of two NetCDF
+# files produced by examples/greenland/greenland.x (W_til, N, p_w, and
+# water-flux magnitude). The two files come from two runs of greenland.x
+# with edited &greenland { out_file } and &fhyd { method_transport } in
+# the namelist -- e.g. BUCKET-only (method_transport=0) saved to
+# output/greenland_bucket.nc and BUCKET+K24 (method_transport=1) saved
+# to output/greenland_k24.nc.
 #
 # Usage:
 #     julia --project=examples/greenland plot_greenland.jl                # mask ocean (default)

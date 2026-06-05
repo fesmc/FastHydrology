@@ -50,23 +50,19 @@ for the build template and `config/common.mk` for the dependency wiring
 ## Greenland example
 
 End-to-end: build a Greenland-16km hydrology field from a yelmo restart,
-run it for 1000 a, and compare BUCKET-only vs BUCKET+K24 side-by-side.
+run it for 1000 a, and inspect `W_til`, `W`, `overflow`, and `N`.
 
 ```sh
 make greenland
 mkdir -p output
-
-# BUCKET only (method_til=BUCKET, method_transport=NONE)
-./bin/greenland.x examples/greenland/greenland_bucket.nml
-
-# BUCKET + K24 (method_til=BUCKET, method_transport=K24)
-./bin/greenland.x examples/greenland/greenland_k24.nml
+./bin/greenland.x examples/greenland/greenland.nml
 ```
 
-Each run writes a NetCDF file (`output/greenland_bucket.nc`,
-`output/greenland_k24.nc`) with `W_til, dW_til_dt, overflow, W, N, p_w,
-q_x, q_y` on the yelmo `(xc, yc, time)` grid, and prints a one-line
-summary per output step.
+Writes `output/greenland.nc` with `W_til, dW_til_dt, overflow, W, N,
+p_w, q_x, q_y` on the yelmo `(xc, yc, time)` grid and prints a one-line
+summary per output step. Permute configurations by editing the
+`&fhyd { method_til, method_transport }` switches in the namelist (and
+`&greenland { out_file }` so the runs don't clobber each other).
 
 Plot the two side-by-side (Julia; first-time `Pkg.instantiate()`):
 
