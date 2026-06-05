@@ -13,9 +13,19 @@ debug  ?= 0
 openmp ?= 0
 
 ## COMPILER CONFIGURATION ##
-# (assembled by configme from compiler -> machine -> netCDF -> common.mk)
+# Assembled by configme from compiler -> machine -> netCDF fragments and
+# spliced in at the placeholder below. The fragments define the compiler
+# (FC, FFLAGS, FFLAGS_OPENMP, DFLAGS_*), netCDF wiring (INC_NC, LIB_NC),
+# and any host-specific overrides (e.g. LFLAGS_EXTRA).
 
 <COMPILER_CONFIGURATION>
+
+## SHARED DEPENDENCY WIRING ##
+# Pulled in after the compiler/machine fragment so it can reference FFLAGS,
+# FFLAGS_OPENMP, LIB_NC, and LFLAGS_EXTRA set there. Defines the FESMUTILS
+# and FFTW paths, the openmp= build switch, and the final LFLAGS.
+
+include config/common.mk
 
 # Determine whether to use normal flags or debugging flags
 DFLAGS = $(DFLAGS_NODEBUG)
