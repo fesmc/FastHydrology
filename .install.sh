@@ -4,20 +4,17 @@ set -euo pipefail
 # target=FastHydrology  machine=macbook  compiler=gfortran
 
 # --- clone ---
-# FastHydrology: present at /Users/taange001/Documents/Coding/FastHydrology
-git clone git@github.com:fesmc/fesm-utils.git /Users/taange001/Documents/Coding/FastHydrology/fesm-utils
+git clone git@github.com:fesmc/FastHydrology.git /Users/alrobi001/tmp/FastHydrology
+# fesm-utils: link to existing checkout at /Users/alrobi001/models/fesm-utils
+ln -s /Users/alrobi001/models/fesm-utils /Users/alrobi001/tmp/FastHydrology/fesm-utils
 # fesm-utils/utils: component of fesm-utils (not cloned)
 
 # --- manifest ---
-mkdir -p /Users/taange001/Documents/Coding/FastHydrology/.configme  # write .configme/manifest.toml
+mkdir -p /Users/alrobi001/tmp/FastHydrology/.configme  # write .configme/manifest.toml
 
 # --- links ---
 
 # --- configure (per package) ---
-# fesm-utils: build with autotools (slow, ~10-30 min):
-(cd /Users/taange001/Documents/Coding/FastHydrology/fesm-utils && NC_FROOT=/opt/homebrew/Cellar/netcdf-fortran/4.6.3 NC_CROOT=/opt/homebrew/Cellar/netcdf/4.10.0 ./build.py --variant both -m macbook -c gfortran)
-(cd /Users/taange001/Documents/Coding/FastHydrology/fesm-utils/utils && configme config fesm-utils/utils -m macbook -c gfortran)
-# fesm-utils/utils: build (serial, omp):
-(cd /Users/taange001/Documents/Coding/FastHydrology/fesm-utils/utils && make openmp=0 fesmutils-static)
-(cd /Users/taange001/Documents/Coding/FastHydrology/fesm-utils/utils && make openmp=1 fesmutils-static)
-(cd /Users/taange001/Documents/Coding/FastHydrology && configme config FastHydrology -m macbook -c gfortran)
+# fesm-utils: linked external (no configure)
+# fesm-utils/utils: linked external (no configure)
+(cd /Users/alrobi001/tmp/FastHydrology && configme config FastHydrology -m macbook -c gfortran)
