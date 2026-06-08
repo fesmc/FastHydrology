@@ -141,7 +141,7 @@ end
 
 function main()
 
-    data_dir = "$(@__DIR__)/../input/GRL-16KM_yelmo_restart.nc"
+    data_dir = "$(@__DIR__)/../../input/GRL-16KM_yelmo_restart.nc"
     longcoupwater = 5.0
     Nx, Ny, xlims, ylims, mask, h, b, abs_v_b, A_visc, ṁ, κ, x, y = load_data(data_dir);
     grid = OGRectHydroGrid(Nx, Ny, xlims, ylims; T = Float64)
@@ -158,7 +158,7 @@ function main()
 
     f_grnd = mask
 
-    plot_results(x, y, H_w, N, p_w, q; f_grnd = f_grnd, mask_ocean = true, out_png = "$(@__DIR__)/../output/k24.jl_results.png")
+    plot_results(x, y, H_w, N, p_w, q; f_grnd = f_grnd, mask_ocean = true, out_png = "$(@__DIR__)/../../output/k24.jl_results.png")
     
 end
 
