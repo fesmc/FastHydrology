@@ -86,8 +86,8 @@ contains
         par%till%Cc         =    0.12_wp
         par%two_value%delta =    0.02_wp
 
-        call nml_read(filename,group,"rho_ice",        par%rho_ice,         init=init_pars)
-        call nml_read(filename,group,"g",              par%g,               init=init_pars)
+        ! rho_ice and g are set from top-level values in hydro_par_load
+        ! (single source of truth).
         call nml_read(filename,group,"marine_p",       par%marine%p,        init=init_pars)
         call nml_read(filename,group,"marine_rho_sw",  par%marine%rho_sw,   init=init_pars)
         call nml_read(filename,group,"till_N0",        par%till%N0,         init=init_pars)

@@ -92,12 +92,10 @@ program shmip
 
     call update_forcing(cs, t_start, mdot)
 
-    call hydro_init(hyd, nml_file, nx, ny)
-    hyd%par%dx = cs%dx
-    hyd%par%dy = cs%dy
+    call hydro_init(hyd, nml_file, nx, ny, cs%dx, cs%dy)
     call hydro_init_state(hyd, z_bed, f_ice, f_grnd, t_start)
 
-    write(*,'(a,i0,a)')      "  method_til       = ", hyd%par%method_til, " (0=BUCKET 1=EXTERNAL)"
+    write(*,'(a,i0,a)')      "  method_til       = ", hyd%par%method_til, " (0=NONE 1=BUCKET)"
     write(*,'(a,i0,a)')      "  method_transport = ", hyd%par%method_transport, " (0=NONE 1=K24)"
     write(*,'(a,i0)')        "  N_clos           = ", hyd%par%bucket%N_closure
     write(*,'(a,es12.3,a)')  "  bg melt          = ", cs%m_s_background, " m/s"

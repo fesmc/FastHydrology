@@ -3,14 +3,14 @@ module fast_hydrology
     ! two orthogonal components run sequentially each step:
     !
     !   method_til       : how the till storage W_til is evolved
+    !       TIL_NONE     : host owns W_til; bucket does not touch it.
+    !                      Overflow = mdot (raw pass-through to transport).
     !       TIL_BUCKET   : local mass-balance bucket (BvP15-style till storage)
     !                      W_attempt = W_til + dt*(mdot - till_rate)
     !                      W_til     = clamp(W_attempt, 0, W_til_max)
     !                      overflow  = max(0, (W_attempt - W_til_max)/dt)
     !                      With W_til_max(i,j) = 0 the bucket holds nothing
     !                      and everything passes through as overflow.
-    !       TIL_EXTERNAL : host owns W_til; bucket does not touch it.
-    !                      Overflow = mdot (raw pass-through to transport).
     !
     !   method_transport : how the distributed sheet W is computed
     !       TRANSPORT_NONE : W = 0, q_x = q_y = 0. N comes from the bucket's
@@ -18,7 +18,7 @@ module fast_hydrology
     !       TRANSPORT_K24  : Kazmierczak 2024 distributed model with
     !                        FFT-smoothed gradients. Writes W, q_x, q_y, N,
     !                        p_w. The K24 source is the bucket overflow
-    !                        (TIL_BUCKET) or raw mdot (TIL_EXTERNAL).
+    !                        (TIL_BUCKET) or raw mdot (TIL_NONE).
     !
     ! Notation follows van Pelt & Bueler 2015 (BvP15):
     !   W_til : till water storage thickness   [m]
@@ -52,23 +52,21 @@ module fast_hydrology
     real(wp), parameter, public :: SEC_PER_YEAR = 3.1556926e7_wp
 
     ! ---------- method_til enum (par%method_til) ----------
-    integer, parameter, public :: TIL_BUCKET   = 0    ! default
-    integer, parameter, public :: TIL_EXTERNAL = 1    ! host owns W_til
+    integer, parameter, public :: TIL_NONE   = 0    ! host owns W_til; library leaves it alone
+    integer, parameter, public :: TIL_BUCKET = 1    ! default
 
     ! ---------- method_transport enum (par%method_transport) ----------
     integer, parameter, public :: TRANSPORT_NONE = 0
     integer, parameter, public :: TRANSPORT_K24  = 1
 
-    ! ---------- Init-method enum (par%init_method) ----------
-    integer, parameter, public :: HYDRO_INIT_ZERO     = 0
-    integer, parameter, public :: HYDRO_INIT_EXTERNAL = 1
-
     type hydro_param_class
         integer  :: method_til
         integer  :: method_transport
-        integer  :: init_method
-        real(wp) :: dx
-        real(wp) :: dy
+        real(wp) :: dx                ! [m] grid spacing, set from hydro_init argument
+        real(wp) :: dy                ! [m] grid spacing, set from hydro_init argument
+        real(wp) :: rho_ice           ! [kg/m^3] ice density (propagated into k24 and closures)
+        real(wp) :: rho_w             ! [kg/m^3] freshwater density (propagated into k24)
+        real(wp) :: g                 ! [m/s^2] gravitational acceleration
         real(wp) :: W_til_max         ! [m]  scalar default for hyd%now%W_til_max
         integer  :: mask_bc           ! see bucket::MASK_BC_*
         real(wp) :: W_til_bc          ! [m]  imposed W_til at the domain border (MASK_BC_IMPOSED)
@@ -107,13 +105,14 @@ module fast_hydrology
 
 contains
 
-    subroutine hydro_init(hyd, filename, nx, ny, group)
+    subroutine hydro_init(hyd, filename, nx, ny, dx, dy, group)
 
         implicit none
 
         type(hydro_class), intent(INOUT)        :: hyd
         character(len=*),  intent(IN)           :: filename
         integer,           intent(IN)           :: nx, ny
+        real(wp),          intent(IN)           :: dx, dy
         character(len=*),  intent(IN), optional :: group
 
         character(len=32) :: nml_group
@@ -127,6 +126,9 @@ contains
 
         call hydro_par_load(hyd%par, filename, nml_group)
 
+        hyd%par%dx = dx
+        hyd%par%dy = dy
+
         call hydro_allocate(hyd%now, nx, ny)
 
         hyd%now%time        = 0.0_wp
@@ -137,22 +139,24 @@ contains
 
     end subroutine hydro_init
 
-    subroutine hydro_init_state(hyd, z_bed, f_ice, f_grnd, time)
+    subroutine hydro_init_state(hyd, z_bed, f_ice, f_grnd, time, W_til, W)
         ! Initialize state for the first update. Kappa is filled only when
-        ! method_transport == K24. W_til is set according to par%init_method
-        ! on grounded cells; the floating + adjacent-to-floating override is
-        ! applied for TIL_BUCKET. Per-cell W_til_max is filled from
-        ! par%W_til_max (host can overwrite hyd%now%W_til_max(:,:) between
-        ! init and the first update if it wants a spatial cap). Diagnostic
-        ! fields are zeroed.
+        ! method_transport == K24. hyd%now%W_til and hyd%now%W are populated
+        ! from the optional W_til / W arguments (zero when absent); the
+        ! floating + adjacent-to-floating override is applied to W_til for
+        ! TIL_BUCKET. Per-cell W_til_max is filled from par%W_til_max (host
+        ! can overwrite hyd%now%W_til_max(:,:) between init and the first
+        ! update if it wants a spatial cap). Diagnostic fields are zeroed.
 
         implicit none
 
-        type(hydro_class), intent(INOUT) :: hyd
-        real(wp),          intent(IN)    :: z_bed(:,:)
-        real(wp),          intent(IN)    :: f_ice(:,:)
-        real(wp),          intent(IN)    :: f_grnd(:,:)
-        real(wp),          intent(IN)    :: time
+        type(hydro_class), intent(INOUT)        :: hyd
+        real(wp),          intent(IN)           :: z_bed(:,:)
+        real(wp),          intent(IN)           :: f_ice(:,:)
+        real(wp),          intent(IN)           :: f_grnd(:,:)
+        real(wp),          intent(IN)           :: time
+        real(wp),          intent(IN), optional :: W_til(:,:)
+        real(wp),          intent(IN), optional :: W(:,:)
 
         real(dp), allocatable :: z_bed_dp(:,:), kappa_dp(:,:)
         integer :: nx, ny
@@ -175,20 +179,20 @@ contains
         ! spatial cap is needed.
         hyd%now%W_til_max = hyd%par%W_til_max
 
-        select case (hyd%par%init_method)
-            case (HYDRO_INIT_ZERO)
-                hyd%now%W_til = 0.0_wp
-            case (HYDRO_INIT_EXTERNAL)
-                ! Leave W_til untouched (host filled it)
-                continue
-            case default
-                write(*,*) "hydro_init_state:: error: init_method must be 0 or 1."
-                write(*,*) "init_method = ", hyd%par%init_method
-                stop
-        end select
+        if (present(W_til)) then
+            hyd%now%W_til = W_til
+        else
+            hyd%now%W_til = 0.0_wp
+        end if
+
+        if (present(W)) then
+            hyd%now%W = W
+        else
+            hyd%now%W = 0.0_wp
+        end if
 
         ! Zero W_til outside the active (grounded ice) set and apply the
-        ! configurable domain-border BC. Skipped for TIL_EXTERNAL (host
+        ! configurable domain-border BC. Skipped for TIL_NONE (host
         ! manages W_til including overrides).
         if (hyd%par%method_til == TIL_BUCKET) then
             call apply_floating_override(hyd%now%W_til, f_ice, f_grnd)
@@ -197,7 +201,6 @@ contains
 
         hyd%now%dW_til_dt = 0.0_wp
         hyd%now%overflow  = 0.0_wp
-        hyd%now%W         = 0.0_wp
         hyd%now%p_w       = 0.0_wp
         hyd%now%q_x       = 0.0_wp
         hyd%now%q_y       = 0.0_wp
@@ -272,17 +275,17 @@ contains
         if (dt_sec > 0.0_wp) then
             select case (hyd%par%method_til)
 
+                case (TIL_NONE)
+                    ! Host owns W_til; do not touch it. K24 sees raw source.
+                    hyd%now%overflow = mdot
+
                 case (TIL_BUCKET)
                     call calc_bucket(hyd%now%W_til, hyd%now%overflow, &
                                      f_ice, f_grnd, mask, mdot, &
                                      dt_sec, hyd%par%bucket, hyd%now%W_til_max)
 
-                case (TIL_EXTERNAL)
-                    ! Host owns W_til; do not touch it. K24 sees raw source.
-                    hyd%now%overflow = mdot
-
                 case default
-                    write(*,*) "hydro_update:: error: method_til must be 0 (BUCKET) or 1 (EXTERNAL)."
+                    write(*,*) "hydro_update:: error: method_til must be 0 (NONE) or 1 (BUCKET)."
                     write(*,*) "method_til = ", hyd%par%method_til
                     stop
 
@@ -470,18 +473,20 @@ contains
 
         par%method_til       = TIL_BUCKET
         par%method_transport = TRANSPORT_NONE
-        par%init_method      = HYDRO_INIT_ZERO
         par%dx               = 0.0_wp
         par%dy               = 0.0_wp
+        par%rho_ice          = 917.0_wp
+        par%rho_w            = 1000.0_wp
+        par%g                = 9.81_wp
         par%W_til_max        = 2.0_wp
         par%mask_bc          = MASK_BC_ZERO
         par%W_til_bc         = 0.0_wp
 
         call nml_read(filename,group,"method_til",        par%method_til,        init=init_pars)
         call nml_read(filename,group,"method_transport",  par%method_transport,  init=init_pars)
-        call nml_read(filename,group,"init_method",       par%init_method,       init=init_pars)
-        call nml_read(filename,group,"dx",                par%dx,                init=init_pars)
-        call nml_read(filename,group,"dy",                par%dy,                init=init_pars)
+        call nml_read(filename,group,"rho_ice",           par%rho_ice,           init=init_pars)
+        call nml_read(filename,group,"rho_w",             par%rho_w,             init=init_pars)
+        call nml_read(filename,group,"g",                 par%g,                 init=init_pars)
         call nml_read(filename,group,"W_til_max",         par%W_til_max,         init=init_pars)
         call nml_read(filename,group,"mask_bc",           par%mask_bc,           init=init_pars)
         call nml_read(filename,group,"W_til_bc",          par%W_til_bc,          init=init_pars)
@@ -489,6 +494,14 @@ contains
         call bucket_par_load (par%bucket,   filename, group, init=init_pars)
         call k24_par_load    (par%k24,      filename, group, init=init_pars)
         call closure_par_load(par%closures, filename, group, init=init_pars)
+
+        ! Propagate top-level physical constants into sub-structs so K24
+        ! and closures see a single source of truth.
+        par%k24%ice_density   = real(par%rho_ice, dp)
+        par%k24%water_density = real(par%rho_w,   dp)
+        par%k24%gravity       = real(par%g,       dp)
+        par%closures%rho_ice  = par%rho_ice
+        par%closures%g        = par%g
 
         return
 

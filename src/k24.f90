@@ -101,9 +101,8 @@ contains
 
         call nml_read(filename,group,"k24_substrate_type",                par%substrate_type,                init=init_pars)
         call nml_read(filename,group,"k24_flux_solver",                   par%flux_solver,                   init=init_pars)
-        call nml_read(filename,group,"k24_water_density",                 par%water_density,                 init=init_pars)
-        call nml_read(filename,group,"k24_ice_density",                   par%ice_density,                   init=init_pars)
-        call nml_read(filename,group,"k24_gravity",                       par%gravity,                       init=init_pars)
+        ! water_density, ice_density, gravity are set from top-level
+        ! rho_w / rho_ice / g in hydro_par_load (single source of truth).
         call nml_read(filename,group,"k24_manning_exponent",              par%manning_exponent,              init=init_pars)
         call nml_read(filename,group,"k24_latent_heat_water",             par%latent_heat_water,             init=init_pars)
         call nml_read(filename,group,"k24_bed_thickness",                 par%bed_thickness,                 init=init_pars)
@@ -183,7 +182,7 @@ contains
         !
         ! The source `mdot` is the water source rate fed into the transport
         ! solver. In sequential bucket->K24 coupling this is the bucket
-        ! overflow (till-saturation spill). In TIL_EXTERNAL mode it can be
+        ! overflow (till-saturation spill). In TIL_NONE mode it can be
         ! the raw basal-melt water equivalent.
 
         implicit none

@@ -88,12 +88,11 @@ program greenland
     write(*,'(a,f7.3,a,f7.3,a)') "  dx,dy   = ", dx_km, " km, ", dy_km, " km"
 
     ! ---- Initialize library ----
-    call hydro_init(hyd, nml_file, nx, ny)
-    hyd%par%dx = dx_km * 1000.0_wp_local
-    hyd%par%dy = dy_km * 1000.0_wp_local
+    call hydro_init(hyd, nml_file, nx, ny, &
+                    dx_km * 1000.0_wp_local, dy_km * 1000.0_wp_local)
     call hydro_init_state(hyd, z_bed, f_ice, f_grnd, 0.0_wp_local)
 
-    write(*,'(a,i0,a)') "  method_til       = ", hyd%par%method_til, " (0=BUCKET 1=EXTERNAL)"
+    write(*,'(a,i0,a)') "  method_til       = ", hyd%par%method_til, " (0=NONE 1=BUCKET)"
     write(*,'(a,i0,a)') "  method_transport = ", hyd%par%method_transport, " (0=NONE 1=K24)"
     write(*,'(a,i0)')   "  N_clos           = ", hyd%par%bucket%N_closure
     write(*,'(a,i0)')   "  mask_bc          = ", hyd%par%mask_bc
