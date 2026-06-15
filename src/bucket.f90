@@ -76,6 +76,9 @@ contains
 
         logical :: init_pars
 
+        character(len=*), parameter :: def_file  = "input/yelmo_defaults.nml"
+        character(len=*), parameter :: def_group = "fhyd"
+
         init_pars = .FALSE.
         if (present(init)) init_pars = init
 
@@ -83,8 +86,8 @@ contains
         par%till_rate = 1.0e-3_wp
         par%N_closure = 0
 
-        call nml_read(filename,group,"bkt_till_rate", par%till_rate, init=init_pars)
-        call nml_read(filename,group,"bkt_N_closure", par%N_closure, init=init_pars)
+        call nml_read(filename,group,"bkt_till_rate", par%till_rate, init=init_pars,defaults_file=def_file,defaults_group=def_group)
+        call nml_read(filename,group,"bkt_N_closure", par%N_closure, init=init_pars,defaults_file=def_file,defaults_group=def_group)
 
         ! Convert till_rate from namelist units (m/a) to internal SI (m/s).
         par%till_rate = par%till_rate / SEC_PER_YEAR

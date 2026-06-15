@@ -73,6 +73,9 @@ contains
 
         logical :: init_pars
 
+        character(len=*), parameter :: def_file  = "input/yelmo_defaults.nml"
+        character(len=*), parameter :: def_group = "fhyd"
+
         init_pars = .FALSE.
         if (present(init)) init_pars = init
 
@@ -99,25 +102,25 @@ contains
         par%W_min                         =    1.0e-8_dp
         par%W_max                         =    0.015_dp
 
-        call nml_read(filename,group,"k24_substrate_type",                par%substrate_type,                init=init_pars)
-        call nml_read(filename,group,"k24_flux_solver",                   par%flux_solver,                   init=init_pars)
+        call nml_read(filename,group,"k24_substrate_type",                par%substrate_type,                init=init_pars,defaults_file=def_file,defaults_group=def_group)
+        call nml_read(filename,group,"k24_flux_solver",                   par%flux_solver,                   init=init_pars,defaults_file=def_file,defaults_group=def_group)
         ! water_density, ice_density, gravity are set from top-level
         ! rho_w / rho_ice / g in hydro_par_load (single source of truth).
-        call nml_read(filename,group,"k24_manning_exponent",              par%manning_exponent,              init=init_pars)
-        call nml_read(filename,group,"k24_latent_heat_water",             par%latent_heat_water,             init=init_pars)
-        call nml_read(filename,group,"k24_bed_thickness",                 par%bed_thickness,                 init=init_pars)
-        call nml_read(filename,group,"k24_manning_coefficient_exponent",  par%manning_coefficient_exponent,  init=init_pars)
-        call nml_read(filename,group,"k24_bed_friction_exponent",         par%bed_friction_exponent,         init=init_pars)
-        call nml_read(filename,group,"k24_friction_factor",               par%friction_factor,               init=init_pars)
-        call nml_read(filename,group,"k24_till_factor",                   par%till_factor,                   init=init_pars)
-        call nml_read(filename,group,"k24_critical_discharge",            par%critical_discharge,            init=init_pars)
-        call nml_read(filename,group,"k24_initial_cavity_height",         par%initial_cavity_height,         init=init_pars)
-        call nml_read(filename,group,"k24_coupling_length",               par%coupling_length,               init=init_pars)
-        call nml_read(filename,group,"k24_long_coupling_water",           par%long_coupling_water,           init=init_pars)
-        call nml_read(filename,group,"k24_min_pressure_fraction",         par%min_pressure_fraction,         init=init_pars)
-        call nml_read(filename,group,"k24_eta_w",                         par%eta_w,                         init=init_pars)
-        call nml_read(filename,group,"k24_W_min",                         par%W_min,                         init=init_pars)
-        call nml_read(filename,group,"k24_W_max",                         par%W_max,                         init=init_pars)
+        call nml_read(filename,group,"k24_manning_exponent",              par%manning_exponent,              init=init_pars,defaults_file=def_file,defaults_group=def_group)
+        call nml_read(filename,group,"k24_latent_heat_water",             par%latent_heat_water,             init=init_pars,defaults_file=def_file,defaults_group=def_group)
+        call nml_read(filename,group,"k24_bed_thickness",                 par%bed_thickness,                 init=init_pars,defaults_file=def_file,defaults_group=def_group)
+        call nml_read(filename,group,"k24_manning_coefficient_exponent",  par%manning_coefficient_exponent,  init=init_pars,defaults_file=def_file,defaults_group=def_group)
+        call nml_read(filename,group,"k24_bed_friction_exponent",         par%bed_friction_exponent,         init=init_pars,defaults_file=def_file,defaults_group=def_group)
+        call nml_read(filename,group,"k24_friction_factor",               par%friction_factor,               init=init_pars,defaults_file=def_file,defaults_group=def_group)
+        call nml_read(filename,group,"k24_till_factor",                   par%till_factor,                   init=init_pars,defaults_file=def_file,defaults_group=def_group)
+        call nml_read(filename,group,"k24_critical_discharge",            par%critical_discharge,            init=init_pars,defaults_file=def_file,defaults_group=def_group)
+        call nml_read(filename,group,"k24_initial_cavity_height",         par%initial_cavity_height,         init=init_pars,defaults_file=def_file,defaults_group=def_group)
+        call nml_read(filename,group,"k24_coupling_length",               par%coupling_length,               init=init_pars,defaults_file=def_file,defaults_group=def_group)
+        call nml_read(filename,group,"k24_long_coupling_water",           par%long_coupling_water,           init=init_pars,defaults_file=def_file,defaults_group=def_group)
+        call nml_read(filename,group,"k24_min_pressure_fraction",         par%min_pressure_fraction,         init=init_pars,defaults_file=def_file,defaults_group=def_group)
+        call nml_read(filename,group,"k24_eta_w",                         par%eta_w,                         init=init_pars,defaults_file=def_file,defaults_group=def_group)
+        call nml_read(filename,group,"k24_W_min",                         par%W_min,                         init=init_pars,defaults_file=def_file,defaults_group=def_group)
+        call nml_read(filename,group,"k24_W_max",                         par%W_max,                         init=init_pars,defaults_file=def_file,defaults_group=def_group)
 
         return
 

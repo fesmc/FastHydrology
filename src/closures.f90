@@ -73,6 +73,9 @@ contains
 
         logical :: init_pars
 
+        character(len=*), parameter :: def_file  = "input/yelmo_defaults.nml"
+        character(len=*), parameter :: def_group = "fhyd"
+
         init_pars = .FALSE.
         if (present(init)) init_pars = init
 
@@ -88,13 +91,13 @@ contains
 
         ! rho_ice and g are set from top-level values in hydro_par_load
         ! (single source of truth).
-        call nml_read(filename,group,"marine_p",       par%marine%p,        init=init_pars)
-        call nml_read(filename,group,"marine_rho_sw",  par%marine%rho_sw,   init=init_pars)
-        call nml_read(filename,group,"till_N0",        par%till%N0,         init=init_pars)
-        call nml_read(filename,group,"till_delta",     par%till%delta,      init=init_pars)
-        call nml_read(filename,group,"till_e0",        par%till%e0,         init=init_pars)
-        call nml_read(filename,group,"till_Cc",        par%till%Cc,         init=init_pars)
-        call nml_read(filename,group,"two_value_delta",par%two_value%delta, init=init_pars)
+        call nml_read(filename,group,"marine_p",       par%marine%p,        init=init_pars,defaults_file=def_file,defaults_group=def_group)
+        call nml_read(filename,group,"marine_rho_sw",  par%marine%rho_sw,   init=init_pars,defaults_file=def_file,defaults_group=def_group)
+        call nml_read(filename,group,"till_N0",        par%till%N0,         init=init_pars,defaults_file=def_file,defaults_group=def_group)
+        call nml_read(filename,group,"till_delta",     par%till%delta,      init=init_pars,defaults_file=def_file,defaults_group=def_group)
+        call nml_read(filename,group,"till_e0",        par%till%e0,         init=init_pars,defaults_file=def_file,defaults_group=def_group)
+        call nml_read(filename,group,"till_Cc",        par%till%Cc,         init=init_pars,defaults_file=def_file,defaults_group=def_group)
+        call nml_read(filename,group,"two_value_delta",par%two_value%delta, init=init_pars,defaults_file=def_file,defaults_group=def_group)
 
         return
 

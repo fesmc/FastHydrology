@@ -468,8 +468,16 @@ contains
 
         logical :: init_pars
 
+        ! Path to the canonical yelmo defaults file. The &fhyd parameters
+        ! the user file does not set fall through to this schema; user-file
+        ! typos in &fhyd are caught by nml_validate.
+        character(len=*), parameter :: def_file  = "input/yelmo_defaults.nml"
+        character(len=*), parameter :: def_group = "fhyd"
+
         init_pars = .FALSE.
         if (present(init)) init_pars = init
+
+        call nml_validate(filename,def_file,group,defaults_group=def_group)
 
         par%method_til       = TIL_BUCKET
         par%method_transport = TRANSPORT_NONE
@@ -482,14 +490,14 @@ contains
         par%mask_bc          = MASK_BC_ZERO
         par%W_til_bc         = 0.0_wp
 
-        call nml_read(filename,group,"method_til",        par%method_til,        init=init_pars)
-        call nml_read(filename,group,"method_transport",  par%method_transport,  init=init_pars)
-        call nml_read(filename,group,"rho_ice",           par%rho_ice,           init=init_pars)
-        call nml_read(filename,group,"rho_w",             par%rho_w,             init=init_pars)
-        call nml_read(filename,group,"g",                 par%g,                 init=init_pars)
-        call nml_read(filename,group,"W_til_max",         par%W_til_max,         init=init_pars)
-        call nml_read(filename,group,"mask_bc",           par%mask_bc,           init=init_pars)
-        call nml_read(filename,group,"W_til_bc",          par%W_til_bc,          init=init_pars)
+        call nml_read(filename,group,"method_til",        par%method_til,        init=init_pars,defaults_file=def_file,defaults_group=def_group)
+        call nml_read(filename,group,"method_transport",  par%method_transport,  init=init_pars,defaults_file=def_file,defaults_group=def_group)
+        call nml_read(filename,group,"rho_ice",           par%rho_ice,           init=init_pars,defaults_file=def_file,defaults_group=def_group)
+        call nml_read(filename,group,"rho_w",             par%rho_w,             init=init_pars,defaults_file=def_file,defaults_group=def_group)
+        call nml_read(filename,group,"g",                 par%g,                 init=init_pars,defaults_file=def_file,defaults_group=def_group)
+        call nml_read(filename,group,"W_til_max",         par%W_til_max,         init=init_pars,defaults_file=def_file,defaults_group=def_group)
+        call nml_read(filename,group,"mask_bc",           par%mask_bc,           init=init_pars,defaults_file=def_file,defaults_group=def_group)
+        call nml_read(filename,group,"W_til_bc",          par%W_til_bc,          init=init_pars,defaults_file=def_file,defaults_group=def_group)
 
         call bucket_par_load (par%bucket,   filename, group, init=init_pars)
         call k24_par_load    (par%k24,      filename, group, init=init_pars)
