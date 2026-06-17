@@ -12,28 +12,28 @@
 /
 
 &fhyd
-    ! ---- top-level ----
-    method_til         = 1        ! 0=NONE 1=BUCKET
-    method_transport   = 0        ! 0=NONE 1=K24
-    rho_ice            = 917.0    ! [kg/m^3]
-    rho_w              = 1000.0   ! [kg/m^3] freshwater
-    g                  = 9.81     ! [m/s^2]
-    W_til_max          = 2.0      ! [m]
-    mask_bc            = 0        ! 0=ZERO 1=IMPOSED 2=MIRROR (BC at domain edges i=1,nx,j=1,ny)
-    W_til_bc           = 0.0      ! [m] imposed W_til at the domain border (mask_bc=1)
+    ! Basal hydrology (fasthydrology). Closure parameters mirror the legacy
+    ! &yneff till closure; W_til_max / bkt_till_rate mirror the legacy &ytherm bucket.
+    method_til       = 1   ! 0=NONE 1=BUCKET
+    method_transport = 0   ! 0=NONE 1=K24
+    W_til_max        = 2.0 ! [m]   was ytherm.H_w_max
+    mask_bc          = 0   ! 0=ZERO 1=IMPOSED 2=MIRROR
+    W_til_bc         = 0.0 ! [m]
 
     ! ---- bucket (bkt_) ----
-    bkt_till_rate = 1.0e-3        ! [m/a] background till drainage (converted to m/s internally)
-    bkt_N_closure = 1             ! 0=NONE 1=OVERBURDEN 2=MARINE 3=TILL 4=TWO_VALUE
+    bkt_N_closure     = 1      ! 0=CONST 1=OVERBURDEN 2=MARINE 3=TILL 4=TWO_VALUE
+    bkt_till_rate     = 1.0e-3 ! [m/a]  was ytherm.till_rate
+    bkt_floating_mode = 1      ! 0=ZERO 1=MARGIN_FILL (legacy saturate floating+margin ring)
 
     ! ---- closures (no prefix) ----
-    marine_p         = 1.0
-    marine_rho_sw    = 1028.0
-    till_N0          = 1000.0
-    till_delta       = 0.02
-    till_e0          = 0.69
-    till_Cc          = 0.12
-    two_value_delta  = 0.02
+    const_N         = 1.0e7  ! [Pa] N_CLOSURE_CONST (legacy yneff.const)
+    marine_p        = 1.0
+    marine_rho_sw   = 1028.0
+    till_N0         = 1000.0 ! legacy yneff.N0
+    till_delta      = 0.02   ! legacy yneff.delta
+    till_e0         = 0.69   ! legacy yneff.e0
+    till_Cc         = 0.12   ! legacy yneff.Cc
+    two_value_delta = 0.02
 
     ! ---- k24 (k24_) ----
     k24_substrate_type               = 0
@@ -50,7 +50,7 @@
     k24_coupling_length              = 1.0e4
     k24_long_coupling_water          = 5.0
     k24_min_pressure_fraction        = 0.02
-    k24_eta_w                        = 1.8e-3        ! [Pa s] water dynamic viscosity (Kazmierczak 2022)
-    k24_W_min                        = 1.0e-8        ! [m]    W (sheet) lower clamp
-    k24_W_max                        = 0.015         ! [m]    W (sheet) upper clamp
+    k24_eta_w                        = 1.8e-3
+    k24_W_min                        = 1.0e-8
+    k24_W_max                        = 0.015
 /

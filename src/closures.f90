@@ -18,12 +18,11 @@ module fast_hydrology_closures
     integer, parameter :: wp = sp
 
     ! ---------- Closure enum (par%bucket%N_closure) ----------
-    integer, parameter, public :: N_CLOSURE_NONE       = 0
+    integer, parameter, public :: N_CLOSURE_CONST      = 0  ! constant N_eff (also covers the old NONE case)
     integer, parameter, public :: N_CLOSURE_OVERBURDEN = 1
     integer, parameter, public :: N_CLOSURE_MARINE     = 2  ! Leguy 2014
     integer, parameter, public :: N_CLOSURE_TILL       = 3  ! van Pelt & Bueler 2015
     integer, parameter, public :: N_CLOSURE_TWO_VALUE  = 4  ! standalone-only
-    integer, parameter, public :: N_CLOSURE_CONST      = 5  ! constant N_eff (was yneff method=0)
 
     type closure_marine_param_class
         real(wp) :: p           ! [0:1] ocean connectivity exponent

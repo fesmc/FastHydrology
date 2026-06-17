@@ -406,9 +406,6 @@ contains
 
         select case (hyd%par%bucket%N_closure)
 
-            case (N_CLOSURE_NONE)
-                return
-
             case (N_CLOSURE_OVERBURDEN)
                 !$omp parallel do default(shared) private(i,j) schedule(static)
                 do j = 1, ny
