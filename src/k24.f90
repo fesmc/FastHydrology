@@ -74,7 +74,7 @@ contains
         logical :: init_pars
 
         character(len=*), parameter :: def_file  = "input/yelmo_defaults.nml"
-        character(len=*), parameter :: def_group = "fhyd"
+        character(len=*), parameter :: def_group = "yhyd"
 
         init_pars = .FALSE.
         if (present(init)) init_pars = init

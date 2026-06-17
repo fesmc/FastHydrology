@@ -23,6 +23,7 @@ module fast_hydrology_closures
     integer, parameter, public :: N_CLOSURE_MARINE     = 2  ! Leguy 2014
     integer, parameter, public :: N_CLOSURE_TILL       = 3  ! van Pelt & Bueler 2015
     integer, parameter, public :: N_CLOSURE_TWO_VALUE  = 4  ! standalone-only
+    integer, parameter, public :: N_CLOSURE_CONST      = 5  ! constant N_eff (was yneff method=0)
 
     type closure_marine_param_class
         real(wp) :: p           ! [0:1] ocean connectivity exponent
@@ -44,6 +45,7 @@ module fast_hydrology_closures
         ! constants shared across closures
         real(wp) :: rho_ice
         real(wp) :: g
+        real(wp) :: N_const     ! [Pa]  imposed constant effective pressure (N_CLOSURE_CONST)
         type(closure_marine_param_class)    :: marine
         type(closure_till_param_class)      :: till
         type(closure_two_value_param_class) :: two_value
@@ -59,6 +61,7 @@ module fast_hydrology_closures
     public :: hydro_calc_N_marine
     public :: hydro_calc_N_till
     public :: hydro_calc_N_two_value
+    public :: hydro_calc_N_const
 
 contains
 
@@ -74,13 +77,14 @@ contains
         logical :: init_pars
 
         character(len=*), parameter :: def_file  = "input/yelmo_defaults.nml"
-        character(len=*), parameter :: def_group = "fhyd"
+        character(len=*), parameter :: def_group = "yhyd"
 
         init_pars = .FALSE.
         if (present(init)) init_pars = init
 
         par%rho_ice         = 917.0_wp
         par%g               =   9.81_wp
+        par%N_const         =   1.0e7_wp
         par%marine%p        =   1.0_wp
         par%marine%rho_sw   = 1028.0_wp
         par%till%N0         = 1000.0_wp
@@ -91,6 +95,7 @@ contains
 
         ! rho_ice and g are set from top-level values in hydro_par_load
         ! (single source of truth).
+        call nml_read(filename,group,"const_N",        par%N_const,         init=init_pars,defaults_file=def_file,defaults_group=def_group)
         call nml_read(filename,group,"marine_p",       par%marine%p,        init=init_pars,defaults_file=def_file,defaults_group=def_group)
         call nml_read(filename,group,"marine_rho_sw",  par%marine%rho_sw,   init=init_pars,defaults_file=def_file,defaults_group=def_group)
         call nml_read(filename,group,"till_N0",        par%till%N0,         init=init_pars,defaults_file=def_file,defaults_group=def_group)
@@ -205,6 +210,22 @@ contains
         N  = P0 * (1.0_wp - f_pmp) + P1 * f_pmp
 
     end subroutine hydro_calc_N_two_value
+
+    ! ============================================================
+    ! Constant: N = N_const on grounded ice (was yneff method=0, neff_const)
+    ! ============================================================
+    elemental subroutine hydro_calc_N_const(N, f_grnd, N_const)
+
+        real(wp), intent(OUT) :: N
+        real(wp), intent(IN)  :: f_grnd, N_const
+
+        if (f_grnd > 0.0_wp) then
+            N = N_const
+        else
+            N = 0.0_wp
+        end if
+
+    end subroutine hydro_calc_N_const
 
     ! ------------------------------------------------------------
     ! Helper: H_eff with margin treatment (set_frac_zero=true semantics)

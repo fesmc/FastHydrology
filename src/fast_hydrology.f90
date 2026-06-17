@@ -51,6 +51,14 @@ module fast_hydrology
     ! the internal dt_sec. Match the value in bucket.f90.
     real(wp), parameter, public :: SEC_PER_YEAR = 3.1556926e7_wp
 
+    ! Physical constants. Hard-coded internally (previously the namelist
+    ! parameters rho_ice / rho_w / g); these are effectively fixed in practice,
+    ! so they are no longer exposed in &yhyd. Propagated into the k24 and
+    ! closure sub-structs in hydro_par_load.
+    real(wp), parameter, public :: RHO_ICE = 917.0_wp    ! [kg/m^3] ice density
+    real(wp), parameter, public :: RHO_W   = 1000.0_wp   ! [kg/m^3] freshwater density
+    real(wp), parameter, public :: G_GRAV  = 9.81_wp     ! [m/s^2]  gravitational acceleration
+
     ! ---------- method_til enum (par%method_til) ----------
     integer, parameter, public :: TIL_NONE   = 0    ! host owns W_til; library leaves it alone
     integer, parameter, public :: TIL_BUCKET = 1    ! default
@@ -64,9 +72,6 @@ module fast_hydrology
         integer  :: method_transport
         real(wp) :: dx                ! [m] grid spacing, set from hydro_init argument
         real(wp) :: dy                ! [m] grid spacing, set from hydro_init argument
-        real(wp) :: rho_ice           ! [kg/m^3] ice density (propagated into k24 and closures)
-        real(wp) :: rho_w             ! [kg/m^3] freshwater density (propagated into k24)
-        real(wp) :: g                 ! [m/s^2] gravitational acceleration
         real(wp) :: W_til_max         ! [m]  scalar default for hyd%now%W_til_max
         integer  :: mask_bc           ! see bucket::MASK_BC_*
         real(wp) :: W_til_bc          ! [m]  imposed W_til at the domain border (MASK_BC_IMPOSED)
@@ -117,11 +122,11 @@ contains
 
         character(len=32) :: nml_group
 
-        ! Resolve the namelist group name (default = "fhyd").
+        ! Resolve the namelist group name (default = "yhyd").
         if (present(group)) then
             nml_group = trim(group)
         else
-            nml_group = "fhyd"
+            nml_group = "yhyd"
         end if
 
         call hydro_par_load(hyd%par, filename, nml_group)
@@ -351,7 +356,20 @@ contains
 
         ! ---- Step 4: W_til overrides ----
         if (hyd%par%method_til == TIL_BUCKET .and. dt_sec > 0.0_wp) then
-            call apply_floating_override(hyd%now%W_til, f_ice, f_grnd)
+            select case (hyd%par%bucket%floating_mode)
+
+                case (FLOATING_ZERO)
+                    call apply_floating_override(hyd%now%W_til, f_ice, f_grnd)
+
+                case (FLOATING_MARGIN_FILL)
+                    call apply_margin_fill(hyd%now%W_til, f_ice, f_grnd, hyd%now%W_til_max)
+
+                case default
+                    write(*,*) "hydro_update:: error: bkt_floating_mode must be 0 (ZERO) or 1 (MARGIN_FILL)."
+                    write(*,*) "floating_mode = ", hyd%par%bucket%floating_mode
+                    stop
+
+            end select
             call apply_mask_bc(hyd%now%W_til, hyd%par%mask_bc, hyd%par%W_til_bc)
         end if
 
@@ -425,6 +443,15 @@ contains
                 end do
                 !$omp end parallel do
 
+            case (N_CLOSURE_CONST)
+                !$omp parallel do default(shared) private(i,j) schedule(static)
+                do j = 1, ny
+                do i = 1, nx
+                    call hydro_calc_N_const(hyd%now%N(i,j), f_grnd(i,j), hyd%par%closures%N_const)
+                end do
+                end do
+                !$omp end parallel do
+
             case default
                 write(*,*) "apply_N_closure:: error: unsupported post-step closure ", &
                            hyd%par%bucket%N_closure
@@ -468,11 +495,11 @@ contains
 
         logical :: init_pars
 
-        ! Path to the canonical yelmo defaults file. The &fhyd parameters
+        ! Path to the canonical yelmo defaults file. The &yhyd parameters
         ! the user file does not set fall through to this schema; user-file
-        ! typos in &fhyd are caught by nml_validate.
+        ! typos in &yhyd are caught by nml_validate.
         character(len=*), parameter :: def_file  = "input/yelmo_defaults.nml"
-        character(len=*), parameter :: def_group = "fhyd"
+        character(len=*), parameter :: def_group = "yhyd"
 
         init_pars = .FALSE.
         if (present(init)) init_pars = init
@@ -483,18 +510,12 @@ contains
         par%method_transport = TRANSPORT_NONE
         par%dx               = 0.0_wp
         par%dy               = 0.0_wp
-        par%rho_ice          = 917.0_wp
-        par%rho_w            = 1000.0_wp
-        par%g                = 9.81_wp
         par%W_til_max        = 2.0_wp
         par%mask_bc          = MASK_BC_ZERO
         par%W_til_bc         = 0.0_wp
 
         call nml_read(filename,group,"method_til",        par%method_til,        init=init_pars,defaults_file=def_file,defaults_group=def_group)
         call nml_read(filename,group,"method_transport",  par%method_transport,  init=init_pars,defaults_file=def_file,defaults_group=def_group)
-        call nml_read(filename,group,"rho_ice",           par%rho_ice,           init=init_pars,defaults_file=def_file,defaults_group=def_group)
-        call nml_read(filename,group,"rho_w",             par%rho_w,             init=init_pars,defaults_file=def_file,defaults_group=def_group)
-        call nml_read(filename,group,"g",                 par%g,                 init=init_pars,defaults_file=def_file,defaults_group=def_group)
         call nml_read(filename,group,"W_til_max",         par%W_til_max,         init=init_pars,defaults_file=def_file,defaults_group=def_group)
         call nml_read(filename,group,"mask_bc",           par%mask_bc,           init=init_pars,defaults_file=def_file,defaults_group=def_group)
         call nml_read(filename,group,"W_til_bc",          par%W_til_bc,          init=init_pars,defaults_file=def_file,defaults_group=def_group)
@@ -503,13 +524,13 @@ contains
         call k24_par_load    (par%k24,      filename, group, init=init_pars)
         call closure_par_load(par%closures, filename, group, init=init_pars)
 
-        ! Propagate top-level physical constants into sub-structs so K24
+        ! Propagate the hard-coded physical constants into sub-structs so K24
         ! and closures see a single source of truth.
-        par%k24%ice_density   = real(par%rho_ice, dp)
-        par%k24%water_density = real(par%rho_w,   dp)
-        par%k24%gravity       = real(par%g,       dp)
-        par%closures%rho_ice  = par%rho_ice
-        par%closures%g        = par%g
+        par%k24%ice_density   = real(RHO_ICE, dp)
+        par%k24%water_density = real(RHO_W,   dp)
+        par%k24%gravity       = real(G_GRAV,  dp)
+        par%closures%rho_ice  = RHO_ICE
+        par%closures%g        = G_GRAV
 
         return
 
