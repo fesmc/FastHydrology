@@ -1,0 +1,20 @@
+# Legacy single-file config for `python config.py --file pik_hpc2024_ifx`.
+# Modern path: `python config.py pik_hpc2024 ifx` (or `configme`). This file
+# inlines the per-machine/per-compiler bits and then `include`s common.mk
+# for the shared dependency wiring. NETCDFC_ROOT / NETCDFFI_ROOT come from
+# the cluster module environment.
+
+FC = ifx
+
+INC_NC = -I${NETCDFFI_ROOT}/include
+LIB_NC = -L${NETCDFFI_ROOT}/lib -Wl\,-rpath=${NETCDFFI_ROOT}/lib -lnetcdff -L${NETCDFC_ROOT}/lib -Wl\,-rpath=${NETCDFC_ROOT}/lib -lnetcdf
+# the -rpath options ensure that the same shared libraries are found at runtime
+
+# Compiler flags (ifx). FFLAGS_OPENMP is appended by common.mk when building
+# with `make openmp=1`.
+FFLAGS = -no-wrap-margin -module $(objdir) -L$(objdir)
+FFLAGS_OPENMP = -qopenmp
+
+DFLAGS_NODEBUG = -O2 -fp-model precise
+DFLAGS_DEBUG   = -C -traceback -ftrapuv -fpe0 -check all -fp-model precise
+DFLAGS_PROFILE = -O2 -fp-model precise -pg

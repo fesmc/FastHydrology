@@ -1,0 +1,26 @@
+# Legacy single-file config for `python config.py --file macbook_gfortran`.
+#
+# The modern path is `python config.py macbook gfortran` (or `configme`),
+# which assembles compilers/<compiler>.mk + machines/<machine>.mk centrally.
+# This legacy file inlines the per-machine/per-compiler bits only; the
+# shared dependency wiring (config/common.mk) is `include`d by the Makefile
+# template itself.
+
+FC = gfortran
+
+# Note: set NC_CROOT and NC_FROOT in .zshrc
+INC_NC = -I${NC_FROOT}/include
+LIB_NC = -L${NC_FROOT}/lib -lnetcdff -L${NC_CROOT}/lib -lnetcdf
+
+# Compiler flags (gfortran). FFLAGS_OPENMP is appended by common.mk when
+# building with `make openmp=1`.
+FFLAGS = -ffree-line-length-none -I$(objdir) -J$(objdir)
+FFLAGS_OPENMP = -fopenmp
+
+# Apple ld (ld64) rejects -Wl,-zmuldefs (GNU-ld/ELF flag). Disable it before
+# common.mk's `LFLAGS_EXTRA ?= -Wl,-zmuldefs` runs.
+LFLAGS_EXTRA =
+
+DFLAGS_NODEBUG = -O2
+DFLAGS_DEBUG   = -w -g -ggdb -ffpe-trap=invalid,zero,overflow,underflow -fbacktrace -fcheck=all
+DFLAGS_PROFILE = -O2 -pg

@@ -3,6 +3,7 @@ bin/
 *.bak
 output/
 .DS_Store
+.claude
 .install.sh
 .upgrade.sh
 .runme/config.toml
