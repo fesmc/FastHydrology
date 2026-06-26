@@ -1,5 +1,11 @@
 # FastHydrology
 
+> **Compatibility (dev):** must be rebuilt against **fesm-utils dev at `3f415cc`
+> (2026-06-26) or later** (the release that folded `coordinates` into `utils/src/coords/`
+> and split `constants` out of `precision`). FastHydrology needs **no source changes** — it
+> only uses the stable `nml`/`ncio` interfaces — but its `libfasthydro.a` must be relinked
+> against the new fesm-utils.
+
 A Fortran library of basal-hydrology models for ice-sheet simulations.
 Two orthogonal switches select how till water storage and water transport
 are handled, run sequentially each step.
