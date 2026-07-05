@@ -2,5 +2,4 @@
 package = "FastHydrology"
 deps = [
     "fesm-utils",
-    "fesm-utils/utils",
 ]
