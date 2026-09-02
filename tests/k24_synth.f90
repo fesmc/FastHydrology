@@ -24,16 +24,18 @@ program k24_synth
     integer,  parameter :: dp = kind(1.d0)
     real(dp), parameter :: PI = 3.14159265358979323846_dp
 
-    integer,  parameter :: nx = 48, ny = 32
-    real(dp), parameter :: dx = 2000.0_dp, dy = 3000.0_dp
+    ! Grid size and spacing come from the input file, so the same driver runs
+    ! the small synthetic case and a full ice-sheet dataset (e.g. Thwaites 2km).
+    integer  :: nx, ny
 
     character(len=256) :: nml_file, out_file, in_file
 
-    real(dp) :: h(nx,ny), b(nx,ny), mask(nx,ny), mdot(nx,ny)
-    real(dp) :: uxy_b(nx,ny), A_glen(nx,ny), kappa(nx,ny)
-    real(dp) :: q_x(nx,ny), q_y(nx,ny), N(nx,ny), p_w(nx,ny), W(nx,ny), q(nx,ny)
-    real(dp) :: xc(nx), yc(ny)
-    real(dp) :: gsx(nx,ny), gsy(nx,ny), absgs(nx,ny), absg(nx,ny), phi0(nx,ny)
+    real(dp) :: dx, dy
+    real(dp), allocatable :: h(:,:), b(:,:), mask(:,:), mdot(:,:)
+    real(dp), allocatable :: uxy_b(:,:), A_glen(:,:), kappa(:,:)
+    real(dp), allocatable :: q_x(:,:), q_y(:,:), N(:,:), p_w(:,:), W(:,:), q(:,:)
+    real(dp), allocatable :: xc(:), yc(:)
+    real(dp), allocatable :: gsx(:,:), gsy(:,:), absgs(:,:), absg(:,:), phi0(:,:)
     integer  :: i, j
 
     type(k24_param_class) :: par
@@ -51,8 +53,22 @@ program k24_synth
     par%gravity       =    9.81_dp
     call k24_finalize_par(par)
 
-    ! ---- synthetic fields, read from the shared generated input so both
-    !      implementations see bit-identical data (see k24_synth_gen.jl) ----
+    ! ---- fields read from the shared input file so both implementations see
+    !      bit-identical data (see k24_synth_gen.jl / thw_export.jl) ----
+    nx = nc_size(in_file, "xc")
+    ny = nc_size(in_file, "yc")
+
+    allocate(xc(nx), yc(ny))
+    allocate(h(nx,ny), b(nx,ny), mask(nx,ny), mdot(nx,ny))
+    allocate(uxy_b(nx,ny), A_glen(nx,ny), kappa(nx,ny))
+    allocate(q_x(nx,ny), q_y(nx,ny), N(nx,ny), p_w(nx,ny), W(nx,ny), q(nx,ny))
+    allocate(gsx(nx,ny), gsy(nx,ny), absgs(nx,ny), absg(nx,ny), phi0(nx,ny))
+
+    call nc_read(in_file, "xc",   xc)
+    call nc_read(in_file, "yc",   yc)
+    dx = xc(2) - xc(1)
+    dy = yc(2) - yc(1)
+
     call nc_read(in_file, "h",    h)
     call nc_read(in_file, "b",    b)
     call nc_read(in_file, "mask", mask)
@@ -69,9 +85,6 @@ program k24_synth
                   h, b, mask, mdot, uxy_b, A_glen, kappa, dx, dy, par, &
                   gsx, gsy, absgs, absg, phi0)
 
-    do i = 1, nx; xc(i) = real(i-1,dp)*dx; end do
-    do j = 1, ny; yc(j) = real(j-1,dp)*dy; end do
-
     call nc_create(out_file)
     call nc_write_dim(out_file, "xc", x=xc, units="m")
     call nc_write_dim(out_file, "yc", x=yc, units="m")
@@ -86,6 +99,7 @@ program k24_synth
     call nc_write(out_file, "absg",  absg,  dim1="xc", dim2="yc")
     call nc_write(out_file, "phi0",  phi0,  dim1="xc", dim2="yc")
 
+    write(*,'(a,i0,a,i0,a,f9.2,a,f9.2)') "k24_synth: ", nx, " x ", ny, "  dx=", dx, " dy=", dy
     write(*,'(a,a)') "k24_synth: wrote ", trim(out_file)
 
 end program k24_synth

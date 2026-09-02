@@ -13,7 +13,7 @@ JLPROJ="${1:?usage: $0 /path/to/FastHydrology.jl [workdir]}"
 WORK="${2:-/tmp/k24_crossvalidate}"
 JL="julia --project=$JLPROJ"
 NML_SRC="par/k24_greenland.nml"
-INPUT="tests/k24_synth_input.nc"
+INPUT="${K24_INPUT:-tests/k24_synth_input.nc}"   # override to run the same sweep on another dataset
 TOL="${K24_TOL:-1e-12}"   # relative; override to tighten/loosen
 
 mkdir -p "$WORK"
@@ -58,7 +58,7 @@ SL='s/^    k24_sliding_law                  = 0/    k24_sliding_law             
 ST='s/^    k24_substrate_type               = 0/    k24_substrate_type               = '
 DR='s/^    k24_drainage_mode                = 0/    k24_drainage_mode                = '
 
-echo "Synthetic case (double precision throughout; expect ~1e-15)"
+echo "Case sweep on $INPUT (double precision throughout; expect ~1e-15)"
 echo
 run_case hard_both      ""
 run_case soft_both      "substrate=soft"                        "${ST}1/"

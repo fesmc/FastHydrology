@@ -6,6 +6,11 @@
 #   wthick=darcy|laminar|areal  grad=mean|local  longcoup=<float>
 #   psi=recursive|iterative|topological  dissip=true|false
 #   sliding=none|weertman|powerplastic|regcoulomb  ctill=<float>  report=0|1
+#   maxpsi=<int>   filliters=<int>   input=<path>
+#
+# Every option must be matched by the corresponding k24_* key in the namelist
+# given to k24_synth.x -- an option exposed on one side but not the other
+# silently compares two different configurations.
 
 using NCDatasets
 using FastHydrology
@@ -19,10 +24,13 @@ for a in ARGS[2:end]
 end
 get_cfg(k, d) = get(cfg, k, d)
 
-const dx, dy = 2000.0, 3000.0
 const IN = get_cfg("input", "tests/k24_synth_input.nc")
 
 ds = NCDataset(IN)
+# Grid size and spacing come from the file, so the same script runs the small
+# synthetic case and a full ice-sheet dataset (e.g. Thwaites 2km).
+xc = Array{Float64}(ds["xc"][:]); yc = Array{Float64}(ds["yc"][:])
+dx = xc[2] - xc[1];               dy = yc[2] - yc[1]
 h    = Array{Float64}(ds["h"][:, :]);    b    = Array{Float64}(ds["b"][:, :])
 mask = Array{Float64}(ds["mask"][:, :]); vb   = Array{Float64}(ds["vb"][:, :])
 A    = Array{Float64}(ds["A"][:, :]);    mdot = Array{Float64}(ds["mdot"][:, :])
@@ -64,8 +72,8 @@ sliding_law =
                            NoSlidingLaw()
 
 # Half-cell-padded limits so grid.dx/dy come out exactly dx/dy.
-xlims = (-dx/2, (Nx - 1)*dx + dx/2)
-ylims = (-dy/2, (Ny - 1)*dy + dy/2)
+xlims = (xc[1] - dx/2, xc[Nx] + dx/2)
+ylims = (yc[1] - dy/2, yc[Ny] + dy/2)
 grid  = ArrayHydroGrid(Nx, Ny, xlims, ylims; T = Float64)
 @assert isapprox(grid.dx, dx; rtol = 1e-12) && isapprox(grid.dy, dy; rtol = 1e-12)
 
@@ -75,6 +83,8 @@ model = KazmierczakHydroModel(grid, kappa, vb, A, mdot .* 1000.0;   # mass rate 
     psi_out_algorithm         = psi_out_algorithm,
     drainage_mode             = drainage_mode,
     sliding_law               = sliding_law,
+    max_psi_out_calls         = parse(Int, get_cfg("maxpsi", "50000")),
+    fill_iters                = parse(Int, get_cfg("filliters", "10")),
     dissipation_melt          = parse(Bool, get_cfg("dissip", "true")))
 
 state = HydroState(grid, mask, h, b)
@@ -92,8 +102,8 @@ p_w = Array(model.Po) .- Array(state.N)
 
 NCDataset(out_path, "c") do out
     defDim(out, "xc", Nx); defDim(out, "yc", Ny)
-    defVar(out, "xc", collect(0:Nx-1) .* dx, ("xc",))
-    defVar(out, "yc", collect(0:Ny-1) .* dy, ("yc",))
+    defVar(out, "xc", xc, ("xc",))
+    defVar(out, "yc", yc, ("yc",))
     defVar(out, "W",    Array(state.W), ("xc", "yc"))
     defVar(out, "N",    Array(state.N), ("xc", "yc"))
     defVar(out, "q",    Array(model.q), ("xc", "yc"))

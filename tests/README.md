@@ -24,6 +24,48 @@ above the ~1e-15 round-off the synthetic case actually achieves). The
 Greenland case is reported but not tolerance-checked, since its `real(sp)`
 API caps it at ~1e-7.
 
+`K24_INPUT` points the sweep at a different dataset. Both `k24_synth.x` and
+`tests/k24_synth.jl` take the grid size and spacing from the input file, so any
+NetCDF with `xc`, `yc` and the fields `h`, `b`, `mask`, `vb`, `A`, `mdot`
+(water-equivalent volume rate, m/s) works:
+
+```sh
+K24_INPUT=/tmp/thwaites_input.nc tests/k24_crossvalidate.sh /path/to/FastHydrology.jl
+```
+
+### Thwaites 2 km
+
+`k24_thwaites_export.jl` converts the Kazmierczak et al. 2024 Thwaites dataset
+that ships with FastHydrology.jl into that format:
+
+```sh
+julia --project=/path/to/FastHydrology.jl tests/k24_thwaites_export.jl \
+  "/path/to/FastHydrology.jl/test/Kazmierczak et al 2024/input/Kazmierczak2024/THWAITES2km_m3_HAB_toto.mat" \
+  /tmp/thwaites_input.nc
+```
+
+345 x 288 with 51945 grounded cells — 25x Greenland-16km and a much harder
+test of the flow routing. All 18 configurations agree to ~1e-13 or better.
+The `.nc` is ~4.8 MB and derived from FastHydrology.jl's own test data, so it
+is generated rather than committed.
+
+Two things this dataset exercises that the others do not:
+
+- **The `max_psi_out_calls` cutoff actually binds.** 51945 grounded cells
+  exceeds the default 50000, so the routing is truncated part-way. Raising
+  `k24_max_psi_out_calls` to 400000 changes the answer materially (mean `q`
+  2.1409e-4 -> 2.1763e-4, mean `N` 1.3807e6 -> 1.3119e6) — and both
+  implementations move together to 10 significant figures, so the truncation
+  itself lands identically. If you raise it on one side you must raise it on
+  the other, or you are comparing two different models.
+- **The flow-direction graph is genuinely cyclic.** The topological router
+  leaves 26938 of 51945 grounded cells (51.9%) unprocessed, matching
+  `TopologicalPsiOut`'s own docstring ("roughly half of all grounded cells at
+  the model's default `longcoupwater = 5.0`"). Its answer is therefore very
+  different from the recursive/iterative one (mean `q` 1.28e-5 vs 2.14e-4) —
+  both implementations agree on it exactly, but that agreement is not a reason
+  to use it on real data.
+
 ## `k24_synth.f90` — K24 cross-validation against FastHydrology.jl
 
 The Fortran K24 model in `src/k24.f90` is a port of the `kazmierczak2024`
