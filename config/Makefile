@@ -81,7 +81,7 @@ $(objdir)/fast_hydrology.o : $(srcdir)/fast_hydrology.f90 \
 ## Targets
 ###############################################
 
-.PHONY: all fasthydro-static shmip greenland clean
+.PHONY: all fasthydro-static shmip greenland k24_synth k24_greenland clean
 
 all: fasthydro-static
 
@@ -111,5 +111,23 @@ greenland: fasthydro-static
 	@echo "    $(bindir)/greenland.x is ready."
 	@echo ""
 
+k24_synth: fasthydro-static
+	@mkdir -p $(bindir)
+	$(FC) $(DFLAGS) $(FFLAGS) $(INC_FESMUTILS) \
+	    -o $(bindir)/k24_synth.x $(bindir)/k24_greenland.x $(testdir)/k24_synth.f90 \
+	    -L$(libdir) -lfasthydro $(LFLAGS)
+	@echo ""
+	@echo "    $(bindir)/k24_synth.x is ready."
+	@echo ""
+
+k24_greenland: fasthydro-static
+	@mkdir -p $(bindir)
+	$(FC) $(DFLAGS) $(FFLAGS) $(INC_FESMUTILS) \
+	    -o $(bindir)/k24_greenland.x $(testdir)/k24_greenland.f90 \
+	    -L$(libdir) -lfasthydro $(LFLAGS)
+	@echo ""
+	@echo "    $(bindir)/k24_greenland.x is ready."
+	@echo ""
+
 clean:
-	rm -f $(objdir)/*.o $(objdir)/*.mod $(libdir)/libfasthydro.a $(bindir)/shmip.x $(bindir)/greenland.x
+	rm -f $(objdir)/*.o $(objdir)/*.mod $(libdir)/libfasthydro.a $(bindir)/shmip.x $(bindir)/greenland.x $(bindir)/k24_synth.x $(bindir)/k24_greenland.x
