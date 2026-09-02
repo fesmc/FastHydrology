@@ -1,11 +1,3 @@
-&greenland
-    restart_file = "input/GRL-16KM_yelmo_restart.nc"
-    out_file     = "hydro.nc"
-    t_end        = 1000.0
-    dt_step      = 0.5
-    dt_out       = 100.0
-/
-
 &yhyd
     ! Basal hydrology (fasthydrology). Closure parameters mirror the legacy
     ! &yneff till closure; W_til_max / bkt_till_rate mirror the legacy &ytherm bucket.
@@ -13,7 +5,7 @@
     ! NOTE: the group is &yhyd (it was renamed from &fhyd in v0.3). The example
     ! files still carried the old &fhyd name, so their settings were silently
     ! ignored and the schema defaults were used instead.
-    method_til       = 1     ! 0=NONE 1=BUCKET
+    method_til       = 0     ! 0=NONE 1=BUCKET
     method_transport = 1     ! 0=NONE 1=K24
     W_til_max        = 2.0   ! [m]   was ytherm.H_w_max
     mask_bc          = 0     ! 0=ZERO 1=IMPOSED 2=MIRROR
