@@ -1797,7 +1797,7 @@ contains
         !$omp parallel do default(shared) private(i,j) schedule(static)
         do j = 1, ny
             do i = 1, nx
-                wk%Po(i,j) = max(par%ice_density * par%gravity * H_ice(i,j), 1.0e5_dp)
+                wk%Po(i,j) = par%ice_density * par%gravity * H_ice(i,j)
             end do
         end do
         !$omp end parallel do
@@ -1848,10 +1848,12 @@ contains
         !$omp parallel do default(shared) private(i,j,arg) schedule(static)
         do j = 1, ny
             do i = 1, nx
-                ! DEVIATION: N_inf == 0 (possible once min_pressure_fraction is
-                ! 0, the new default) makes the erf argument diverge. Julia
-                ! evaluates erf(+-Inf)*0 = 0 there, and 0/0 -> NaN in the
-                ! doubly-degenerate phi0 == 0 case; both give 0 here.
+                ! N_inf == 0 (reachable once min_pressure_fraction is 0, the
+                ! default, and Po's own floor is gone -- flat h == b == 0
+                ! cells now get Po == 0 too) makes the erf argument diverge:
+                ! Inf, or 0/0 -> NaN in the doubly-degenerate phi0 == 0 case.
+                ! Julia guards this the same way (overwrite_where! on N_inf
+                ! == 0 after the fact); this branch is the equivalent here.
                 if (wk%N_inf(i,j) > 0.0_dp) then
                     arg    = sqrt_pi * wk%phi0(i,j) / (2.0_dp * wk%N_inf(i,j))
                     N(i,j) = max(0.0_dp, erf(arg) * wk%N_inf(i,j))

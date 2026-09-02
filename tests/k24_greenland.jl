@@ -110,9 +110,11 @@ sim   = SteadyStateSimulation(model, grid, state)
 
 FastHydrology.run!(sim)
 
-# Po with the 1e5 floor -- update_Po!'s own definition, which is also what the
-# Fortran uses for p_w. (greenland.jl recomputes rho_i*g*h without the floor;
-# that differs at cells thinner than ~11 m.)
+# update_Po!'s own definition (rho_i*g*h, no floor as of the Po-floor removal --
+# see effective_pressure.jl), which is also what the Fortran uses for p_w and
+# what greenland.jl recomputes independently; the two no longer diverge at thin
+# ice, unlike when Po carried a 1e5 floor here that greenland.jl's rho_i*g*h
+# recomputation didn't.
 p_w = Array(model.Po) .- Array(state.N)
 
 NCDataset(out_path, "c") do out
