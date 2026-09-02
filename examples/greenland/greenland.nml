@@ -63,13 +63,16 @@
     k24_long_coupling_water          = 5.0      ! longcoupwater; 0 disables the smoothing entirely
     k24_eta_w                        = 5.703855806525211e-11 ! eta_w [Pa s] = 1.8e-3 per year
 
-    ! -- clamps. Julia's constructor leaves all of these OFF; KORI-ULB's own
-    !    values are given in the comments if you want that fidelity back.
-    k24_min_pressure_fraction        = 0.0      ! sigmat        (KORI-ULB: 0.02)
-    k24_W_min                        = 0.0      ! Wmin  [m]     (KORI-ULB: 1.0e-8)
-    k24_W_max                        = 1.0e30   ! Wmax  [m]     (KORI-ULB: 0.015)
-    k24_q_min                        = 0.0      ! q_min [m2/s]
-    k24_q_max                        = 1.0e30   ! q_max [m2/s]  (KORI-ULB: 3.168808781402895e-3 = 1e5 per year)
+    ! -- clamps. The schema default (input/yelmo_defaults.nml) leaves all four
+    !    OFF, matching FastHydrology.jl's constructor. This example sets
+    !    KORI-ULB's own values explicitly instead, so it keeps the clamping
+    !    behaviour it has always had -- override or delete them to follow the
+    !    library default.
+    k24_min_pressure_fraction        = 0.02                    ! sigmat
+    k24_W_min                        = 1.0e-8                  ! Wmin  [m]
+    k24_W_max                        = 0.015                   ! Wmax  [m]
+    k24_q_min                        = 0.0                     ! q_min [m2/s]
+    k24_q_max                        = 3.168808781402895e-3    ! q_max [m2/s] = 1e5 per year
 
     ! -- solver configuration --
     k24_fill_iters                   = 10       ! fill_iters
