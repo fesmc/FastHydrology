@@ -51,7 +51,19 @@
     k24_critical_discharge           = 1.0      ! Q_c [m3/s]
     k24_initial_cavity_height        = 0.1      ! H_0 [m]
     k24_coupling_length              = 1.0e4    ! l_c, conduit spacing [m]
-    k24_long_coupling_water          = 5.0      ! longcoupwater; 0 disables the smoothing entirely
+    k24_long_coupling_water          = 0.0      ! longcoupwater; 0 disables the smoothing entirely.
+                                                 ! GRL-16KM: the coupling length at longcoup=5.0
+                                                 ! (~6.7x mean ice thickness) is well under one grid
+                                                 ! cell here, so the smoothing can't be resolved --
+                                                 ! see the comment at update_smoothed_potential_gradients
+                                                 ! in src/k24.f90 (fesmc/FastHydrology#5).
+                                                 !
+                                                 ! NOTE: tests/k24_crossvalidate.sh also copies this
+                                                 ! file as the SYNTH sweep's template (different grid,
+                                                 ! dx=2000/dy=3000 -- see tests/k24_synth_gen.jl), and
+                                                 ! explicitly re-normalizes this value back to 5.0 for
+                                                 ! every synth case so the sweep's baseline config is
+                                                 ! unaffected by this file's Greenland-specific value.
     k24_eta_w                        = 5.703855806525211e-11 ! eta_w [Pa s] = 1.8e-3 per year
 
     ! -- clamps. Julia's constructor leaves all of these OFF; KORI-ULB's own

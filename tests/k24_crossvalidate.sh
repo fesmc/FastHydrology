@@ -28,6 +28,12 @@ run_case () {
     # keep the per-iteration Picard chatter out of the log
     sed -i 's/^    k24_dissipation_verbose          = True/    k24_dissipation_verbose          = False/;
             s/^    k24_coupling_verbose             = True/    k24_coupling_verbose             = False/' "$nml"
+    # NML_SRC (par/k24_greenland.nml) sets k24_long_coupling_water = 0.0, correct for its own
+    # 16 km grid but not for SYNTH's much finer dx=2000/dy=3000 (k24_synth_gen.jl). Re-normalize
+    # to the sweep's own documented baseline (tests/README.md: "the model's default
+    # longcoupwater = 5.0") so this file's Greenland-specific value doesn't silently change what
+    # every non-longcoup* case below tests. longcoup0/longcoup1 still override this explicitly.
+    sed -i 's/^    k24_long_coupling_water          = 0.0/    k24_long_coupling_water          = 5.0/' "$nml"
     for e in "$@"; do sed -i "$e" "$nml"; done
 
     printf '  %-26s ' "$name"
@@ -86,8 +92,12 @@ echo
 echo "Greenland 16 km case (through the real(sp) public API; expect ~1e-7)"
 echo
 SCALE=2.90585971523335349e-08     # (rho_ice/rho_w)/SEC_PER_YEAR
+# NML_SRC's own k24_long_coupling_water = 0.0 (correct at 16 km) is used as-is here, unlike
+# in run_case above. tests/k24_greenland.jl's own longcoup default is independently hardcoded
+# to "5.0" (get_cfg("longcoup", "5.0")), so it needs the matching override explicitly or the
+# two sides would silently compare different physics.
 if ./bin/k24_greenland.x "$NML_SRC" "$WORK/grl_f.nc" $SCALE > "$WORK/grl_f.log" 2>&1 &&
-   $JL tests/k24_greenland.jl "$WORK/grl_j.nc" mdotscale=$SCALE > "$WORK/grl_j.log" 2>&1; then
+   $JL tests/k24_greenland.jl "$WORK/grl_j.nc" mdotscale=$SCALE longcoup=0.0 > "$WORK/grl_j.log" 2>&1; then
     $JL tests/k24_greenland_compare.jl "$WORK/grl_f.nc" "$WORK/grl_j.nc"
 else
     echo "  Greenland case FAILED (see $WORK/grl_f.log, $WORK/grl_j.log)"; fail=1
