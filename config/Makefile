@@ -114,7 +114,7 @@ greenland: fasthydro-static
 k24_synth: fasthydro-static
 	@mkdir -p $(bindir)
 	$(FC) $(DFLAGS) $(FFLAGS) $(INC_FESMUTILS) \
-	    -o $(bindir)/k24_synth.x $(bindir)/k24_greenland.x $(testdir)/k24_synth.f90 \
+	    -o $(bindir)/k24_synth.x $(testdir)/k24_synth.f90 \
 	    -L$(libdir) -lfasthydro $(LFLAGS)
 	@echo ""
 	@echo "    $(bindir)/k24_synth.x is ready."
