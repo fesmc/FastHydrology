@@ -142,7 +142,11 @@ end
 function main()
 
     data_dir = "$(@__DIR__)/../../input/GRL-16KM_yelmo_restart.nc"
-    longcoupwater = 5.0
+    # GRL-16KM: the coupling length at longcoupwater=5.0 (~6.7x mean ice thickness) is well
+    # under one grid cell here, so the smoothing can't be resolved -- see the comment at
+    # update_smoothed_potential_gradients! in FastHydrology.jl's water_flux.jl, and
+    # fesmc/FastHydrology#5.
+    longcoupwater = 0.0
     Nx, Ny, xlims, ylims, mask, h, b, abs_v_b, A_visc, ṁ, κ, x, y = load_data(data_dir);
     grid = OGRectHydroGrid(Nx, Ny, xlims, ylims; T = Float64)
     model = KazmierczakHydroModel(grid, κ, abs_v_b, A_visc, ṁ; longcoupwater = longcoupwater);
