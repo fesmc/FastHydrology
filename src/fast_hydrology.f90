@@ -75,6 +75,8 @@ module fast_hydrology
         real(wp) :: W_til_max         ! [m]  scalar default for hyd%now%W_til_max
         integer  :: mask_bc           ! see bucket::MASK_BC_*
         real(wp) :: W_til_bc          ! [m]  imposed W_til at the domain border (MASK_BC_IMPOSED)
+        logical  :: is_external       ! N is set externally (e.g. by a coupled Julia host);
+                                       ! calc_ydyn_neff must not overwrite dyn%now%N_eff with hyd%now%N
         type(bucket_param_class)  :: bucket
         type(k24_param_class)     :: k24
         type(closure_param_class) :: closures
@@ -510,12 +512,14 @@ contains
         par%W_til_max        = 2.0_wp
         par%mask_bc          = MASK_BC_ZERO
         par%W_til_bc         = 0.0_wp
+        par%is_external       = .FALSE.
 
         call nml_read(filename,group,"method_til",        par%method_til,        init=init_pars,defaults_file=def_file,defaults_group=def_group)
         call nml_read(filename,group,"method_transport",  par%method_transport,  init=init_pars,defaults_file=def_file,defaults_group=def_group)
         call nml_read(filename,group,"W_til_max",         par%W_til_max,         init=init_pars,defaults_file=def_file,defaults_group=def_group)
         call nml_read(filename,group,"mask_bc",           par%mask_bc,           init=init_pars,defaults_file=def_file,defaults_group=def_group)
         call nml_read(filename,group,"W_til_bc",          par%W_til_bc,          init=init_pars,defaults_file=def_file,defaults_group=def_group)
+        call nml_read(filename,group,"is_external",       par%is_external,       init=init_pars,defaults_file=def_file,defaults_group=def_group)
 
         call bucket_par_load (par%bucket,   filename, group, init=init_pars)
         call k24_par_load    (par%k24,      filename, group, init=init_pars)
