@@ -16,6 +16,15 @@ NML_SRC="par/k24_greenland.nml"
 INPUT="${K24_INPUT:-tests/k24_synth_input.nc}"   # override to run the same sweep on another dataset
 TOL="${K24_TOL:-1e-12}"   # relative; override to tighten/loosen
 
+# Portable in-place sed: BSD sed (macOS) requires an explicit backup suffix
+# after -i (even empty), or it silently treats the next argument as that
+# suffix instead of as the script -- which then leaves the script string
+# itself unconsumed and mistaken for the file operand. Always write a .bak
+# and remove it, since that's the one syntax both BSD and GNU sed accept.
+sed_i() {
+    sed -i.bak "$1" "$2" && rm -f "$2.bak"
+}
+
 mkdir -p "$WORK"
 
 fail=0
@@ -26,15 +35,15 @@ run_case () {
     nml="$WORK/$name.nml"
     cp "$NML_SRC" "$nml"
     # keep the per-iteration Picard chatter out of the log
-    sed -i 's/^    k24_dissipation_verbose          = True/    k24_dissipation_verbose          = False/;
+    sed_i 's/^    k24_dissipation_verbose          = True/    k24_dissipation_verbose          = False/;
             s/^    k24_coupling_verbose             = True/    k24_coupling_verbose             = False/' "$nml"
     # NML_SRC (par/k24_greenland.nml) sets k24_long_coupling_water = 0.0, correct for its own
     # 16 km grid but not for SYNTH's much finer dx=2000/dy=3000 (k24_synth_gen.jl). Re-normalize
     # to the sweep's own documented baseline (tests/README.md: "the model's default
     # longcoupwater = 5.0") so this file's Greenland-specific value doesn't silently change what
     # every non-longcoup* case below tests. longcoup0/longcoup1 still override this explicitly.
-    sed -i 's/^    k24_long_coupling_water          = 0.0/    k24_long_coupling_water          = 5.0/' "$nml"
-    for e in "$@"; do sed -i "$e" "$nml"; done
+    sed_i 's/^    k24_long_coupling_water          = 0.0/    k24_long_coupling_water          = 5.0/' "$nml"
+    for e in "$@"; do sed_i "$e" "$nml"; done
 
     printf '  %-26s ' "$name"
     if ! ./bin/k24_synth.x "$nml" "$WORK/${name}_f.nc" "$INPUT" > "$WORK/${name}_f.log" 2>&1; then
