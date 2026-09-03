@@ -92,6 +92,10 @@ module fast_hydrology
         real(wp), allocatable :: p_w(:,:)          ! [Pa]
         real(wp), allocatable :: q_x(:,:)          ! [m2/s]
         real(wp), allocatable :: q_y(:,:)          ! [m2/s]
+        real(wp), allocatable :: q(:,:)            ! [m2/s]   K24 distributed flux magnitude.
+                                                   ! Persists between steps: K24's Picard loops
+                                                   ! warm-start from it, as model.q does in
+                                                   ! FastHydrology.jl. Zero when TRANSPORT_NONE.
         real(wp), allocatable :: N(:,:)            ! [Pa]
         real(wp), allocatable :: kappa(:,:)
     end type
@@ -209,6 +213,7 @@ contains
         hyd%now%p_w       = 0.0_wp
         hyd%now%q_x       = 0.0_wp
         hyd%now%q_y       = 0.0_wp
+        hyd%now%q         = 0.0_wp
         hyd%now%N         = 0.0_wp
 
         hyd%now%time        = time
@@ -254,6 +259,7 @@ contains
         real(dp), allocatable :: src_dp(:,:), uxy_b_dp(:,:), A_glen_dp(:,:)
         real(dp), allocatable :: kappa_dp(:,:)
         real(dp), allocatable :: q_x_dp(:,:), q_y_dp(:,:), N_dp(:,:), p_w_dp(:,:), W_dp(:,:)
+        real(dp), allocatable :: q_dp(:,:)
 
         real(wp), allocatable :: W_til_old(:,:)
         real(wp) :: dt_year, dt_sec
@@ -307,6 +313,7 @@ contains
                 hyd%now%W   = 0.0_wp
                 hyd%now%q_x = 0.0_wp
                 hyd%now%q_y = 0.0_wp
+                hyd%now%q   = 0.0_wp
 
             case (TRANSPORT_K24)
                 if (dt_sec > 0.0_wp) then
@@ -314,6 +321,7 @@ contains
                     allocate(src_dp(nx,ny), uxy_b_dp(nx,ny), A_glen_dp(nx,ny))
                     allocate(kappa_dp(nx,ny))
                     allocate(q_x_dp(nx,ny), q_y_dp(nx,ny), N_dp(nx,ny), p_w_dp(nx,ny), W_dp(nx,ny))
+                    allocate(q_dp(nx,ny))
 
                     H_ice_dp  = real(H_ice,           dp)
                     z_bed_dp  = real(z_bed,           dp)
@@ -323,13 +331,20 @@ contains
                     A_glen_dp = real(A_glen,          dp)
                     kappa_dp  = real(hyd%now%kappa,   dp)
 
-                    call calc_k24(q_x_dp, q_y_dp, N_dp, p_w_dp, W_dp, &
+                    ! q and N are INOUT: K24's Picard loops warm-start from the
+                    ! previous step's values, mirroring model.q / state.N in
+                    ! FastHydrology.jl.
+                    q_dp      = real(hyd%now%q,       dp)
+                    N_dp      = real(hyd%now%N,       dp)
+
+                    call calc_k24(q_x_dp, q_y_dp, N_dp, p_w_dp, W_dp, q_dp, &
                                   H_ice_dp, z_bed_dp, mask_dp, src_dp, uxy_b_dp, A_glen_dp, &
                                   kappa_dp, &
                                   real(hyd%par%dx, dp), real(hyd%par%dy, dp), hyd%par%k24)
 
                     hyd%now%q_x = real(q_x_dp, wp)
                     hyd%now%q_y = real(q_y_dp, wp)
+                    hyd%now%q   = real(q_dp,   wp)
                     hyd%now%N   = real(N_dp,   wp)
                     hyd%now%p_w = real(p_w_dp, wp)
                     hyd%now%W   = real(W_dp,   wp)
@@ -338,6 +353,7 @@ contains
                     deallocate(src_dp, uxy_b_dp, A_glen_dp)
                     deallocate(kappa_dp)
                     deallocate(q_x_dp, q_y_dp, N_dp, p_w_dp, W_dp)
+                    deallocate(q_dp)
                 end if
 
             case default
@@ -388,7 +404,7 @@ contains
 
     ! ------------------------------------------------------------
     ! N-closure post-step. Writes hyd%now%N and derives p_w = Po - N.
-    ! Called when method_transport /= K24. No-op when N_closure == NONE.
+    ! Called when method_transport /= K24. No-op when N_closure == EXTERNAL.
     ! ------------------------------------------------------------
     subroutine apply_N_closure(hyd, H_ice, z_bed, z_sl, f_ice, f_grnd)
 
@@ -405,6 +421,11 @@ contains
         ny = size(H_ice,2)
 
         select case (hyd%par%bucket%N_closure)
+
+            case (N_CLOSURE_EXTERNAL)
+                ! Host owns N (e.g. a coupled Julia hydrology model pushing
+                ! hyd%now%N in directly) - leave it and p_w untouched.
+                return
 
             case (N_CLOSURE_OVERBURDEN)
                 !$omp parallel do default(shared) private(i,j) schedule(static)
@@ -521,6 +542,16 @@ contains
         call k24_par_load    (par%k24,      filename, group, init=init_pars)
         call closure_par_load(par%closures, filename, group, init=init_pars)
 
+        ! K24 solves N jointly with q as part of its own Picard loop; an
+        ! externally-supplied N has nowhere to enter that system, so the
+        ! combination is rejected here rather than silently ignored.
+        if (par%method_transport == TRANSPORT_K24 .and. &
+            par%bucket%N_closure == N_CLOSURE_EXTERNAL) then
+            write(*,*) "hydro_par_load:: error: bkt_N_closure = N_CLOSURE_EXTERNAL (-1) is incompatible with method_transport = TRANSPORT_K24 (1)."
+            write(*,*) "K24 always computes its own N; there is no external entry point for it."
+            stop
+        end if
+
         ! Propagate the hard-coded physical constants into sub-structs so K24
         ! and closures see a single source of truth.
         par%k24%ice_density   = real(RHO_ICE, dp)
@@ -528,6 +559,11 @@ contains
         par%k24%gravity       = real(G_GRAV,  dp)
         par%closures%rho_ice  = RHO_ICE
         par%closures%g        = G_GRAV
+
+        ! Refresh everything K24 derives from those densities (currently the
+        ! Manning-Strickler / Darcy-Weisbach coefficient K, which depends on
+        ! rho_w and the friction factor).
+        call k24_finalize_par(par%k24)
 
         return
 
@@ -550,6 +586,7 @@ contains
         allocate(now%p_w(nx,ny))
         allocate(now%q_x(nx,ny))
         allocate(now%q_y(nx,ny))
+        allocate(now%q(nx,ny))
         allocate(now%N(nx,ny))
         allocate(now%kappa(nx,ny))
 
@@ -561,6 +598,7 @@ contains
         now%p_w       = 0.0_wp
         now%q_x       = 0.0_wp
         now%q_y       = 0.0_wp
+        now%q         = 0.0_wp
         now%N         = 0.0_wp
         now%kappa     = 0.0_wp
 
@@ -582,6 +620,7 @@ contains
         if (allocated(now%p_w))       deallocate(now%p_w)
         if (allocated(now%q_x))       deallocate(now%q_x)
         if (allocated(now%q_y))       deallocate(now%q_y)
+        if (allocated(now%q))         deallocate(now%q)
         if (allocated(now%N))         deallocate(now%N)
         if (allocated(now%kappa))     deallocate(now%kappa)
 

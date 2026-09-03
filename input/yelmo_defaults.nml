@@ -1,15 +1,14 @@
-&shmip
-    case          = "B3"
-    out_file      = "hydro.nc"
-    nx            = 64
-    ny            = 16
-    t_start       = 0.0
-    t_end         = 10.0
-    dt_step       = 0.1
-    dt_out        = 1.0
-    A_glen_const  = 2.5e-25
-    uxy_b_const   = 1.0e-6
-/
+! Canonical &yhyd schema for FastHydrology.
+!
+! Every parameter fast_hydrology / bucket / closures / k24 reads MUST be
+! declared here: nml_read is called with defaults_file="input/yelmo_defaults.nml"
+! and defaults_group="yhyd", which takes the value from this file and then
+! overlays the user's own file on top. A missing key is a hard error, not a
+! fallback to the code default.
+!
+! When FastHydrology runs as a library inside Yelmo, Yelmo's own
+! input/yelmo_defaults.nml is the file on this path -- keep the &yhyd block
+! there in sync with this one.
 
 &yhyd
     ! Basal hydrology (fasthydrology). Closure parameters mirror the legacy
@@ -51,7 +50,7 @@
     k24_drainage_mode                = 0        ! 0=BOTH 1=EFFICIENT_ONLY 2=INEFFICIENT_ONLY
     k24_water_thickness_algorithm    = 0        ! 0=DARCY_WEISBACH 1=LAMINAR 2=AREAL_CONDUIT
     k24_gradient_convention          = 0        ! 0=MEAN 1=LOCAL (Darcy-Weisbach / laminar closures only)
-    k24_sliding_law                  = 0        ! 0=NONE 1=WEERTMAN 2=POWER_PLASTIC 3=REG_COULOMB
+    k24_sliding_law                  = 0        ! 0=PRESCRIBED_FRICTION 1=WEERTMAN 2=POWER_PLASTIC 3=REG_COULOMB
 
     ! -- physical constants --
     k24_manning_exponent             = 3.0      ! n, Glen's flow-law exponent
@@ -67,16 +66,13 @@
     k24_long_coupling_water          = 5.0      ! longcoupwater; 0 disables the smoothing entirely
     k24_eta_w                        = 5.703855806525211e-11 ! eta_w [Pa s] = 1.8e-3 per year
 
-    ! -- clamps. The schema default (input/yelmo_defaults.nml) leaves all four
-    !    OFF, matching FastHydrology.jl's constructor. This example sets
-    !    KORI-ULB's own values explicitly instead, so it keeps the clamping
-    !    behaviour it has always had -- override or delete them to follow the
-    !    library default.
-    k24_min_pressure_fraction        = 0.02                    ! sigmat
-    k24_W_min                        = 1.0e-8                  ! Wmin  [m]
-    k24_W_max                        = 0.015                   ! Wmax  [m]
-    k24_q_min                        = 0.0                     ! q_min [m2/s]
-    k24_q_max                        = 3.168808781402895e-3    ! q_max [m2/s] = 1e5 per year
+    ! -- clamps. Julia's constructor leaves all of these OFF; KORI-ULB's own
+    !    values are given in the comments if you want that fidelity back.
+    k24_min_pressure_fraction        = 0.0      ! sigmat        (KORI-ULB: 0.02)
+    k24_W_min                        = 0.0      ! Wmin  [m]     (KORI-ULB: 1.0e-8)
+    k24_W_max                        = 1.0e30   ! Wmax  [m]     (KORI-ULB: 0.015)
+    k24_q_min                        = 0.0      ! q_min [m2/s]
+    k24_q_max                        = 1.0e30   ! q_max [m2/s]  (KORI-ULB: 3.168808781402895e-3 = 1e5 per year)
 
     ! -- solver configuration --
     k24_fill_iters                   = 10       ! fill_iters
@@ -88,6 +84,10 @@
     k24_max_coupling_iters           = 20       ! max_coupling_iters  (N-dependent sliding laws)
     k24_coupling_rtol                = 1.0e-8   ! coupling_rtol
     k24_coupling_verbose             = True     ! coupling_verbose
+    k24_mdot_includes_friction       = False    ! mdot already includes friction (e.g. an externally
+                                                 ! supplied mdot from another model) -- if True,
+                                                 ! resolve_q skips adding tau_b*uxy_b/(L_w*rho_w) again,
+                                                 ! even with a real (possibly N-dependent) sliding_law
 
     ! -- sliding-law parameters. Only the set belonging to k24_sliding_law is
     !    read; C / c_till are mandatory keywords in Julia and default to 0 here,

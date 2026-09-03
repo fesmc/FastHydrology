@@ -88,6 +88,42 @@ See [`examples/greenland/README.md`](examples/greenland/README.md) for
 the full setup, including the restart-file conventions and how to switch
 the boundary condition.
 
+## The K24 model and FastHydrology.jl
+
+`src/k24.f90` is a port of the `kazmierczak2024` model in
+[FastHydrology.jl](https://github.com/TakisAngelides/FastHydrology.jl)
+(Kazmierczak et al. 2024, https://doi.org/10.5194/tc-18-5887-2024). Where the
+two could differ, the Julia side is the source of truth: every `k24_*` namelist
+default reproduces a `KazmierczakHydroModel` constructor keyword, and each
+parameter's own comment in `input/yelmo_defaults.nml` names the Julia field it
+maps to.
+
+Two conventions differ deliberately:
+
+- **Units.** FastHydrology.jl carries the melt rate as a mass rate [kg/m2/s]
+  and divides by `rho_w` when seeding the flow routing. This library carries it
+  as the water-equivalent volume rate `mdot` [m/s] used everywhere else in the
+  Fortran API, so every melt-like source term picks up an extra `1/rho_w`
+  (`tau_b*v_b/(L_w*rho_w)` rather than `tau_b*v_b/L_w`, and likewise for the
+  dissipation term). Everything else is SI and identical.
+- **Degenerate cases.** The reference lets IEEE arithmetic produce `Inf`/`NaN`
+  at cells where `Q == 0`, `S_inf == 0` or `N_inf == 0` and then overwrites
+  them; this library takes the same limits by an explicit branch instead, since
+  it is built with `-Ofast` where `Inf`/`NaN` propagation is not dependable.
+  Each such site is marked `DEVIATION:` in `src/k24.f90`.
+
+Four clamps that KORI-ULB applies are **off by default**, matching the
+reference constructor: `k24_W_min`, `k24_W_max`, `k24_min_pressure_fraction`
+and `k24_q_max`. KORI-ULB's own values are noted next to each key in the schema
+if you want them back — `k24_q_max` and `k24_min_pressure_fraction` in
+particular guard real numerical edge cases, so turning them off is a genuine
+tradeoff rather than a free simplification.
+
+The port is verified against the Julia implementation on identical inputs by
+`tests/k24_synth.f90` (18 configurations, agreeing to ~1e-15 in double
+precision) and `tests/k24_greenland.f90` (the real 16 km restart, ~1e-7 through
+the `real(sp)` public API). See `tests/README.md`.
+
 ## SHMIP driver
 
 `tests/shmip.f90` runs the SHMIP A–D steady-state benchmarks for quick

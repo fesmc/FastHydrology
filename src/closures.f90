@@ -18,6 +18,7 @@ module fast_hydrology_closures
     integer, parameter :: wp = sp
 
     ! ---------- Closure enum (par%bucket%N_closure) ----------
+    integer, parameter, public :: N_CLOSURE_EXTERNAL   = -1 ! host owns N; hyd%now%N left untouched (was N_CLOSURE_NONE)
     integer, parameter, public :: N_CLOSURE_CONST      = 0  ! constant N_eff (also covers the old NONE case)
     integer, parameter, public :: N_CLOSURE_OVERBURDEN = 1
     integer, parameter, public :: N_CLOSURE_MARINE     = 2  ! Leguy 2014
