@@ -110,9 +110,14 @@ module fast_hydrology_k24
     integer, parameter, public :: K24_GRAD_LOCAL = 1  ! LocalGradient
 
     ! ---------- Sliding-law enum (par%sliding_law) ----------
-    ! Mirrors AbstractSlidingLaw. NONE/WEERTMAN do not depend on N; the other
-    ! two do, and switch resolve_q to the joint (q, N) Picard loop.
-    integer, parameter, public :: K24_SLIDING_NONE          = 0  ! NoSlidingLaw (default)
+    ! Mirrors AbstractSlidingLaw. PRESCRIBED_FRICTION/WEERTMAN do not depend on
+    ! N; the other two do, and switch resolve_q to the joint (q, N) Picard loop.
+    ! PRESCRIBED_FRICTION does not mean "no friction" -- tau_b = 0 from this
+    ! subroutine's point of view, but whatever frictional heating exists is
+    ! assumed to already be in the supplied mdot, with no (q, N) feedback for
+    ! it (see par%mdot_includes_friction below for using a real sliding law's
+    ! tau_b/N feedback while mdot still already includes friction from elsewhere).
+    integer, parameter, public :: K24_SLIDING_PRESCRIBED_FRICTION = 0  ! PrescribedFrictionSlidingLaw (default)
     integer, parameter, public :: K24_SLIDING_WEERTMAN      = 1  ! WeertmanSlidingLaw
     integer, parameter, public :: K24_SLIDING_POWER_PLASTIC = 2  ! PowerPlasticSlidingLaw
     integer, parameter, public :: K24_SLIDING_REG_COULOMB   = 3  ! RegularizedCoulombSlidingLaw
@@ -170,6 +175,14 @@ module fast_hydrology_k24
         integer  :: max_coupling_iters          ! max_coupling_iters
         real(dp) :: coupling_rtol               ! coupling_rtol
         logical  :: coupling_verbose            ! coupling_verbose
+        logical  :: mdot_includes_friction      ! mdot_includes_friction: mdot already includes a
+                                                 ! friction estimate of its own, so resolve_q must not
+                                                 ! add tau_b*uxy_b/(L_w*rho_w) again. Independent of
+                                                 ! sliding_law: tau_b/N still update every sweep for a
+                                                 ! real (possibly N-dependent) sliding law even when
+                                                 ! this is .TRUE. -- only the addition to mdot_total is
+                                                 ! skipped. See AbstractMdotFriction's docstring in the
+                                                 ! Julia model.jl for the full mechanism.
 
         ! -- sliding-law parameters, one set per law so each keeps Julia's own
         !    per-law default (the velocity exponent q differs between them) --
@@ -260,7 +273,7 @@ contains
         par%drainage_mode                 = K24_DRAINAGE_BOTH
         par%water_thickness_algorithm     = K24_WTHICK_DARCY_WEISBACH
         par%gradient_convention           = K24_GRAD_MEAN
-        par%sliding_law                   = K24_SLIDING_NONE
+        par%sliding_law                   = K24_SLIDING_PRESCRIBED_FRICTION
         par%toposort_allow_cycles         = .FALSE.
 
         par%water_density                 = 1000.0_dp
@@ -303,6 +316,7 @@ contains
         par%max_coupling_iters            =   20
         par%coupling_rtol                 = 1.0e-8_dp
         par%coupling_verbose              = .TRUE.
+        par%mdot_includes_friction        = .FALSE.
 
         ! Sliding-law parameters. C and c_till have no Julia default (they are
         ! mandatory keywords there); 0 here makes an unconfigured law a no-op
@@ -351,6 +365,7 @@ contains
         call nml_read(filename,group,"k24_max_coupling_iters",            par%max_coupling_iters,            init=init_pars,defaults_file=def_file,defaults_group=def_group)
         call nml_read(filename,group,"k24_coupling_rtol",                 par%coupling_rtol,                 init=init_pars,defaults_file=def_file,defaults_group=def_group)
         call nml_read(filename,group,"k24_coupling_verbose",              par%coupling_verbose,              init=init_pars,defaults_file=def_file,defaults_group=def_group)
+        call nml_read(filename,group,"k24_mdot_includes_friction",        par%mdot_includes_friction,        init=init_pars,defaults_file=def_file,defaults_group=def_group)
         call nml_read(filename,group,"k24_weertman_C",                    par%weertman_C,                    init=init_pars,defaults_file=def_file,defaults_group=def_group)
         call nml_read(filename,group,"k24_weertman_q",                    par%weertman_q,                    init=init_pars,defaults_file=def_file,defaults_group=def_group)
         call nml_read(filename,group,"k24_power_plastic_c_till",          par%power_plastic_c_till,          init=init_pars,defaults_file=def_file,defaults_group=def_group)
@@ -1052,7 +1067,7 @@ contains
 
         select case (par%sliding_law)
 
-            case (K24_SLIDING_NONE)
+            case (K24_SLIDING_PRESCRIBED_FRICTION)
                 tau_b = 0.0_dp
 
             case (K24_SLIDING_WEERTMAN)
@@ -1105,10 +1120,15 @@ contains
     subroutine resolve_q(q, N, wk, mask, mdot, uxy_b, A_glen, kappa, H_ice, dx, dy, par)
         ! Mirrors the three resolve_q! methods (water_flux.jl):
         !
-        !   * N-independent law (NONE/WEERTMAN), dissipation off -- one pass.
+        !   * N-independent law (PRESCRIBED_FRICTION/WEERTMAN), dissipation off -- one pass.
         !   * N-independent law, dissipation on -- Picard on q alone.
         !   * N-dependent law (POWER_PLASTIC/REG_COULOMB) -- joint (q, N)
         !     Picard, regardless of the dissipation setting.
+        !
+        ! par%mdot_includes_friction independently decides whether tau_b is
+        ! actually added to mdot_total in any of the three (see
+        ! par%mdot_includes_friction's declaration above) -- it does not change
+        ! which of the three subroutines runs.
         implicit none
         real(dp),             intent(INOUT) :: q(:,:), N(:,:)
         type(k24_work_class), intent(INOUT) :: wk
@@ -1173,13 +1193,17 @@ contains
         call update_tau_b(wk%tau_b, N, uxy_b, par)
 
         rL = par%latent_heat_water * par%water_density
-        !$omp parallel do default(shared) private(i,j) schedule(static)
-        do j = 1, wk%ny
-            do i = 1, wk%nx
-                wk%mdot_total(i,j) = mdot(i,j) + wk%tau_b(i,j) * uxy_b(i,j) / rL
+        if (par%mdot_includes_friction) then
+            wk%mdot_total = mdot
+        else
+            !$omp parallel do default(shared) private(i,j) schedule(static)
+            do j = 1, wk%ny
+                do i = 1, wk%nx
+                    wk%mdot_total(i,j) = mdot(i,j) + wk%tau_b(i,j) * uxy_b(i,j) / rL
+                end do
             end do
-        end do
-        !$omp end parallel do
+            !$omp end parallel do
+        end if
 
         call update_psi_out(wk, mask, dx, dy, par)
         call set_q_from_psi_out(q, wk, par)
@@ -1210,18 +1234,29 @@ contains
 
             wk%q_prev = q
 
-            ! Total source: basal melt, the (fixed) frictional-heating term,
-            ! and the dissipation melt from the current q. Zero on the first
-            ! sweep of a cold start, since q begins at zero.
-            !$omp parallel do default(shared) private(i,j) schedule(static)
-            do j = 1, wk%ny
-                do i = 1, wk%nx
-                    wk%mdot_total(i,j) = mdot(i,j) &
-                        + wk%tau_b(i,j) * uxy_b(i,j) / rL &
-                        + abs(q(i,j) * wk%abs_g(i,j)) / rL
+            ! Total source: basal melt, the (fixed) frictional-heating term
+            ! (skipped if par%mdot_includes_friction, since mdot already
+            ! carries it), and the dissipation melt from the current q. Zero
+            ! on the first sweep of a cold start, since q begins at zero.
+            if (par%mdot_includes_friction) then
+                !$omp parallel do default(shared) private(i,j) schedule(static)
+                do j = 1, wk%ny
+                    do i = 1, wk%nx
+                        wk%mdot_total(i,j) = mdot(i,j) + abs(q(i,j) * wk%abs_g(i,j)) / rL
+                    end do
                 end do
-            end do
-            !$omp end parallel do
+                !$omp end parallel do
+            else
+                !$omp parallel do default(shared) private(i,j) schedule(static)
+                do j = 1, wk%ny
+                    do i = 1, wk%nx
+                        wk%mdot_total(i,j) = mdot(i,j) &
+                            + wk%tau_b(i,j) * uxy_b(i,j) / rL &
+                            + abs(q(i,j) * wk%abs_g(i,j)) / rL
+                    end do
+                end do
+                !$omp end parallel do
+            end if
 
             call update_psi_out(wk, mask, dx, dy, par)
             call set_q_from_psi_out(q, wk, par)
@@ -1276,13 +1311,17 @@ contains
 
             call update_tau_b(wk%tau_b, N, uxy_b, par)
 
-            !$omp parallel do default(shared) private(i,j) schedule(static)
-            do j = 1, wk%ny
-                do i = 1, wk%nx
-                    wk%mdot_total(i,j) = mdot(i,j) + wk%tau_b(i,j) * uxy_b(i,j) / rL
+            if (par%mdot_includes_friction) then
+                wk%mdot_total = mdot
+            else
+                !$omp parallel do default(shared) private(i,j) schedule(static)
+                do j = 1, wk%ny
+                    do i = 1, wk%nx
+                        wk%mdot_total(i,j) = mdot(i,j) + wk%tau_b(i,j) * uxy_b(i,j) / rL
+                    end do
                 end do
-            end do
-            !$omp end parallel do
+                !$omp end parallel do
+            end if
 
             if (par%dissipation_melt) then
                 !$omp parallel do default(shared) private(i,j) schedule(static)

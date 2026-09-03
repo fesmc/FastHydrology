@@ -69,7 +69,7 @@ sliding_law =
     sl == "weertman"     ? WeertmanSlidingLaw(C = 1.0e5) :
     sl == "powerplastic" ? PowerPlasticSlidingLaw(c_till = ctill) :
     sl == "regcoulomb"   ? RegularizedCoulombSlidingLaw(c_till = ctill) :
-                           NoSlidingLaw()
+                           PrescribedFrictionSlidingLaw()
 
 # Half-cell-padded limits so grid.dx/dy come out exactly dx/dy.
 xlims = (xc[1] - dx/2, xc[Nx] + dx/2)

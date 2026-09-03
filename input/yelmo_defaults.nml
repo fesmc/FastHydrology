@@ -50,7 +50,7 @@
     k24_drainage_mode                = 0        ! 0=BOTH 1=EFFICIENT_ONLY 2=INEFFICIENT_ONLY
     k24_water_thickness_algorithm    = 0        ! 0=DARCY_WEISBACH 1=LAMINAR 2=AREAL_CONDUIT
     k24_gradient_convention          = 0        ! 0=MEAN 1=LOCAL (Darcy-Weisbach / laminar closures only)
-    k24_sliding_law                  = 0        ! 0=NONE 1=WEERTMAN 2=POWER_PLASTIC 3=REG_COULOMB
+    k24_sliding_law                  = 0        ! 0=PRESCRIBED_FRICTION 1=WEERTMAN 2=POWER_PLASTIC 3=REG_COULOMB
 
     ! -- physical constants --
     k24_manning_exponent             = 3.0      ! n, Glen's flow-law exponent
@@ -84,6 +84,10 @@
     k24_max_coupling_iters           = 20       ! max_coupling_iters  (N-dependent sliding laws)
     k24_coupling_rtol                = 1.0e-8   ! coupling_rtol
     k24_coupling_verbose             = True     ! coupling_verbose
+    k24_mdot_includes_friction       = False    ! mdot already includes friction (e.g. an externally
+                                                 ! supplied mdot from another model) -- if True,
+                                                 ! resolve_q skips adding tau_b*uxy_b/(L_w*rho_w) again,
+                                                 ! even with a real (possibly N-dependent) sliding_law
 
     ! -- sliding-law parameters. Only the set belonging to k24_sliding_law is
     !    read; C / c_till are mandatory keywords in Julia and default to 0 here,

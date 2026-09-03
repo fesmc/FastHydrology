@@ -90,7 +90,7 @@ sliding_law =
     sl == "weertman"     ? WeertmanSlidingLaw(C = 1.0e5) :
     sl == "powerplastic" ? PowerPlasticSlidingLaw(c_till = ctill) :
     sl == "regcoulomb"   ? RegularizedCoulombSlidingLaw(c_till = ctill) :
-                           NoSlidingLaw()
+                           PrescribedFrictionSlidingLaw()
 
 xlims, ylims = FastHydrology.compute_lims(x, y)
 
