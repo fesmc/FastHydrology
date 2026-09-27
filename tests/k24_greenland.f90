@@ -83,7 +83,7 @@ program k24_compare
 
     call hydro_init(hyd, nml_file, nx, ny, &
                     dx_km * 1000.0_wp_local, dy_km * 1000.0_wp_local)
-    call hydro_init_state(hyd, z_bed, f_ice, f_grnd, 0.0_wp_local)
+    call hydro_init_state(hyd, H_ice, z_bed, f_ice, f_grnd, 0.0_wp_local)
 
     write(*,'(a,i0,a,i0)') "k24_compare: grid ", nx, " x ", ny
     write(*,'(a,es14.6)') "  mdot_scale = ", mdot_scale

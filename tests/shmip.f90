@@ -93,7 +93,7 @@ program shmip
     call update_forcing(cs, t_start, mdot)
 
     call hydro_init(hyd, nml_file, nx, ny, cs%dx, cs%dy)
-    call hydro_init_state(hyd, z_bed, f_ice, f_grnd, t_start)
+    call hydro_init_state(hyd, H_ice, z_bed, f_ice, f_grnd, t_start)
 
     write(*,'(a,i0,a)')      "  method_til       = ", hyd%par%method_til, " (0=NONE 1=BUCKET)"
     write(*,'(a,i0,a)')      "  method_transport = ", hyd%par%method_transport, " (0=NONE 1=K24)"

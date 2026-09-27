@@ -110,6 +110,7 @@ module fast_hydrology
     public :: hydro_init
     public :: hydro_init_state
     public :: hydro_update
+    public :: hydro_calc_N
     public :: wp
 
 contains
@@ -148,18 +149,22 @@ contains
 
     end subroutine hydro_init
 
-    subroutine hydro_init_state(hyd, z_bed, f_ice, f_grnd, time, W_til, W)
+    subroutine hydro_init_state(hyd, H_ice, z_bed, f_ice, f_grnd, time, W_til, W)
         ! Initialize state for the first update. Kappa is filled only when
         ! method_transport == K24. hyd%now%W_til and hyd%now%W are populated
         ! from the optional W_til / W arguments (zero when absent); the
         ! floating + adjacent-to-floating override is applied to W_til for
         ! TIL_BUCKET. Per-cell W_til_max is filled from par%W_til_max (host
         ! can overwrite hyd%now%W_til_max(:,:) between init and the first
-        ! update if it wants a spatial cap). Diagnostic fields are zeroed.
+        ! update if it wants a spatial cap). N starts at the overburden
+        ! pressure (p_w = 0), so a host reading N before the first update
+        ! (e.g. K24, whose N only evolves with dt > 0) never sees N = 0 under
+        ! grounded ice. Other diagnostic fields are zeroed.
 
         implicit none
 
         type(hydro_class), intent(INOUT)        :: hyd
+        real(wp),          intent(IN)           :: H_ice(:,:)
         real(wp),          intent(IN)           :: z_bed(:,:)
         real(wp),          intent(IN)           :: f_ice(:,:)
         real(wp),          intent(IN)           :: f_grnd(:,:)
@@ -214,7 +219,10 @@ contains
         hyd%now%q_x       = 0.0_wp
         hyd%now%q_y       = 0.0_wp
         hyd%now%q         = 0.0_wp
-        hyd%now%N         = 0.0_wp
+
+        ! Start from the overburden pressure (p_w = 0 above)
+        call hydro_calc_N_overburden(hyd%now%N, H_ice, f_ice, f_grnd, &
+                                     hyd%par%closures%rho_ice, hyd%par%closures%g)
 
         hyd%now%time        = time
         hyd%now%dt          = 0.0_wp
@@ -420,63 +428,12 @@ contains
         nx = size(H_ice,1)
         ny = size(H_ice,2)
 
-        select case (hyd%par%bucket%N_closure)
+        ! Host owns N (e.g. a coupled Julia hydrology model pushing
+        ! hyd%now%N in directly) - leave it and p_w untouched.
+        if (hyd%par%bucket%N_closure == N_CLOSURE_EXTERNAL) return
 
-            case (N_CLOSURE_EXTERNAL)
-                ! Host owns N (e.g. a coupled Julia hydrology model pushing
-                ! hyd%now%N in directly) - leave it and p_w untouched.
-                return
-
-            case (N_CLOSURE_OVERBURDEN)
-                !$omp parallel do default(shared) private(i,j) schedule(static)
-                do j = 1, ny
-                do i = 1, nx
-                    call hydro_calc_N_overburden(hyd%now%N(i,j), H_ice(i,j), f_ice(i,j), f_grnd(i,j), &
-                                                 hyd%par%closures%rho_ice, hyd%par%closures%g)
-                end do
-                end do
-                !$omp end parallel do
-
-            case (N_CLOSURE_MARINE)
-                !$omp parallel do default(shared) private(i,j) schedule(static)
-                do j = 1, ny
-                do i = 1, nx
-                    call hydro_calc_N_marine(hyd%now%N(i,j), H_ice(i,j), f_ice(i,j), z_bed(i,j), z_sl(i,j), &
-                                             hyd%par%closures%marine%p, hyd%par%closures%rho_ice, &
-                                             hyd%par%closures%marine%rho_sw, hyd%par%closures%g)
-                end do
-                end do
-                !$omp end parallel do
-
-            case (N_CLOSURE_TILL)
-                !$omp parallel do default(shared) private(i,j) schedule(static)
-                do j = 1, ny
-                do i = 1, nx
-                    call hydro_calc_N_till(hyd%now%N(i,j), hyd%now%W_til(i,j), H_ice(i,j), &
-                                           f_ice(i,j), f_grnd(i,j), hyd%now%W_til_max(i,j), &
-                                           hyd%par%closures%till%N0, hyd%par%closures%till%delta, &
-                                           hyd%par%closures%till%e0, hyd%par%closures%till%Cc, &
-                                           hyd%par%closures%rho_ice, hyd%par%closures%g)
-                end do
-                end do
-                !$omp end parallel do
-
-            case (N_CLOSURE_CONST)
-                !$omp parallel do default(shared) private(i,j) schedule(static)
-                do j = 1, ny
-                do i = 1, nx
-                    call hydro_calc_N_const(hyd%now%N(i,j), f_grnd(i,j), hyd%par%closures%N_const)
-                end do
-                end do
-                !$omp end parallel do
-
-            case default
-                write(*,*) "apply_N_closure:: error: unsupported post-step closure ", &
-                           hyd%par%bucket%N_closure
-                write(*,*) "(N_CLOSURE_TWO_VALUE is standalone-only.)"
-                stop
-
-        end select
+        call calc_N_closure(hyd%now%N, hyd%par, hyd%now%W_til, hyd%now%W_til_max, &
+                            H_ice, z_bed, z_sl, f_ice, f_grnd)
 
         ! Derive p_w = Po - N on grounded cells
         !$omp parallel do default(shared) private(i,j,Po,H_eff) schedule(static)
@@ -501,6 +458,109 @@ contains
         return
 
     end subroutine apply_N_closure
+
+    ! ------------------------------------------------------------
+    ! Diagnostic N on the given geometry, without changing the state.
+    ! Uses the configured closure and the current W_til, so a host can
+    ! evaluate N on the geometry its dynamics is about to use (rather than
+    ! the geometry of the last hydro_update). For K24 and N_CLOSURE_EXTERNAL,
+    ! N is part of the evolving state and hyd%now%N is returned.
+    ! ------------------------------------------------------------
+    subroutine hydro_calc_N(hyd, N, H_ice, z_bed, z_sl, f_ice, f_grnd)
+
+        implicit none
+
+        type(hydro_class), intent(IN)  :: hyd
+        real(wp),          intent(OUT) :: N(:,:)
+        real(wp),          intent(IN)  :: H_ice(:,:), z_bed(:,:), z_sl(:,:)
+        real(wp),          intent(IN)  :: f_ice(:,:), f_grnd(:,:)
+
+        if (hyd%par%method_transport == TRANSPORT_K24 .or. &
+            hyd%par%bucket%N_closure == N_CLOSURE_EXTERNAL) then
+            N = hyd%now%N
+            return
+        end if
+
+        call calc_N_closure(N, hyd%par, hyd%now%W_til, hyd%now%W_til_max, &
+                            H_ice, z_bed, z_sl, f_ice, f_grnd)
+
+        return
+
+    end subroutine hydro_calc_N
+
+    subroutine calc_N_closure(N, par, W_til, W_til_max, H_ice, z_bed, z_sl, f_ice, f_grnd)
+        ! Evaluate the configured (non-external) N closure. Shared by
+        ! apply_N_closure (state update) and hydro_calc_N (diagnostic).
+
+        implicit none
+
+        real(wp),                intent(OUT) :: N(:,:)
+        type(hydro_param_class), intent(IN)  :: par
+        real(wp),                intent(IN)  :: W_til(:,:), W_til_max(:,:)
+        real(wp),                intent(IN)  :: H_ice(:,:), z_bed(:,:), z_sl(:,:)
+        real(wp),                intent(IN)  :: f_ice(:,:), f_grnd(:,:)
+
+        integer  :: i, j, nx, ny
+
+        nx = size(H_ice,1)
+        ny = size(H_ice,2)
+
+        select case (par%bucket%N_closure)
+
+            case (N_CLOSURE_OVERBURDEN)
+                !$omp parallel do default(shared) private(i,j) schedule(static)
+                do j = 1, ny
+                do i = 1, nx
+                    call hydro_calc_N_overburden(N(i,j), H_ice(i,j), f_ice(i,j), f_grnd(i,j), &
+                                                 par%closures%rho_ice, par%closures%g)
+                end do
+                end do
+                !$omp end parallel do
+
+            case (N_CLOSURE_MARINE)
+                !$omp parallel do default(shared) private(i,j) schedule(static)
+                do j = 1, ny
+                do i = 1, nx
+                    call hydro_calc_N_marine(N(i,j), H_ice(i,j), f_ice(i,j), z_bed(i,j), z_sl(i,j), &
+                                             par%closures%marine%p, par%closures%rho_ice, &
+                                             par%closures%marine%rho_sw, par%closures%g)
+                end do
+                end do
+                !$omp end parallel do
+
+            case (N_CLOSURE_TILL)
+                !$omp parallel do default(shared) private(i,j) schedule(static)
+                do j = 1, ny
+                do i = 1, nx
+                    call hydro_calc_N_till(N(i,j), W_til(i,j), H_ice(i,j), &
+                                           f_ice(i,j), f_grnd(i,j), W_til_max(i,j), &
+                                           par%closures%till%N0, par%closures%till%delta, &
+                                           par%closures%till%e0, par%closures%till%Cc, &
+                                           par%closures%rho_ice, par%closures%g)
+                end do
+                end do
+                !$omp end parallel do
+
+            case (N_CLOSURE_CONST)
+                !$omp parallel do default(shared) private(i,j) schedule(static)
+                do j = 1, ny
+                do i = 1, nx
+                    call hydro_calc_N_const(N(i,j), f_grnd(i,j), par%closures%N_const)
+                end do
+                end do
+                !$omp end parallel do
+
+            case default
+                write(*,*) "calc_N_closure:: error: unsupported closure ", &
+                           par%bucket%N_closure
+                write(*,*) "(N_CLOSURE_TWO_VALUE is standalone-only.)"
+                stop
+
+        end select
+
+        return
+
+    end subroutine calc_N_closure
 
     subroutine hydro_par_load(par, filename, group, init)
 
