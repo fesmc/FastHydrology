@@ -72,6 +72,8 @@ module fast_hydrology
         integer  :: method_transport
         real(wp) :: dx                ! [m] grid spacing, set from hydro_init argument
         real(wp) :: dy                ! [m] grid spacing, set from hydro_init argument
+        logical  :: periodic_x        ! x wraps with period nx (no halo), set from hydro_init argument
+        logical  :: periodic_y        ! y wraps with period ny (no halo), set from hydro_init argument
         real(wp) :: W_til_max         ! [m]  scalar default for hyd%now%W_til_max
         integer  :: mask_bc           ! see bucket::MASK_BC_*
         real(wp) :: W_til_bc          ! [m]  imposed W_til at the domain border (MASK_BC_IMPOSED)
@@ -115,7 +117,11 @@ module fast_hydrology
 
 contains
 
-    subroutine hydro_init(hyd, filename, nx, ny, dx, dy, group)
+    subroutine hydro_init(hyd, filename, nx, ny, dx, dy, group, periodic_x, periodic_y)
+        ! periodic_x / periodic_y (default .false.) declare a host grid that
+        ! wraps in that direction with period nx / ny and no halo cells (the
+        ! neighbour of i=1 is i=nx and vice versa). All neighbour stencils
+        ! then wrap there and the mask_bc border BC is not applied.
 
         implicit none
 
@@ -124,6 +130,7 @@ contains
         integer,           intent(IN)           :: nx, ny
         real(wp),          intent(IN)           :: dx, dy
         character(len=*),  intent(IN), optional :: group
+        logical,           intent(IN), optional :: periodic_x, periodic_y
 
         character(len=32) :: nml_group
 
@@ -138,6 +145,11 @@ contains
 
         hyd%par%dx = dx
         hyd%par%dy = dy
+
+        if (present(periodic_x)) hyd%par%periodic_x = periodic_x
+        if (present(periodic_y)) hyd%par%periodic_y = periodic_y
+        hyd%par%k24%periodic_x = hyd%par%periodic_x
+        hyd%par%k24%periodic_y = hyd%par%periodic_y
 
         call hydro_allocate(hyd%now, nx, ny)
 
@@ -210,7 +222,8 @@ contains
         ! manages W_til including overrides).
         if (hyd%par%method_til == TIL_BUCKET) then
             call apply_floating_override(hyd%now%W_til, f_ice, f_grnd)
-            call apply_mask_bc(hyd%now%W_til, hyd%par%mask_bc, hyd%par%W_til_bc)
+            call apply_mask_bc(hyd%now%W_til, hyd%par%mask_bc, hyd%par%W_til_bc, &
+                               hyd%par%periodic_x, hyd%par%periodic_y)
         end if
 
         hyd%now%dW_til_dt = 0.0_wp
@@ -386,7 +399,8 @@ contains
                     call apply_floating_override(hyd%now%W_til, f_ice, f_grnd)
 
                 case (FLOATING_MARGIN_FILL)
-                    call apply_margin_fill(hyd%now%W_til, f_ice, f_grnd, hyd%now%W_til_max)
+                    call apply_margin_fill(hyd%now%W_til, f_ice, f_grnd, hyd%now%W_til_max, &
+                                           hyd%par%periodic_x, hyd%par%periodic_y)
 
                 case default
                     write(*,*) "hydro_update:: error: bkt_floating_mode must be 0 (ZERO) or 1 (MARGIN_FILL)."
@@ -394,7 +408,8 @@ contains
                     stop
 
             end select
-            call apply_mask_bc(hyd%now%W_til, hyd%par%mask_bc, hyd%par%W_til_bc)
+            call apply_mask_bc(hyd%now%W_til, hyd%par%mask_bc, hyd%par%W_til_bc, &
+                               hyd%par%periodic_x, hyd%par%periodic_y)
         end if
 
         ! ---- Step 5: dW_til_dt ----
@@ -588,6 +603,8 @@ contains
         par%method_transport = TRANSPORT_NONE
         par%dx               = 0.0_wp
         par%dy               = 0.0_wp
+        par%periodic_x       = .false.
+        par%periodic_y       = .false.
         par%W_til_max        = 2.0_wp
         par%mask_bc          = MASK_BC_ZERO
         par%W_til_bc         = 0.0_wp

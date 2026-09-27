@@ -58,6 +58,10 @@ module fast_hydrology_k24
     !   3. psi_out is zeroed over the whole grid at the start of every sweep.
     !      Julia's persists across calls, so its non-grounded cells carry stale
     !      values; nothing downstream reads them on either side.
+    !   4. Periodic domains (par%periodic_x/periodic_y, set by hydro_init) have
+    !      no Julia counterpart: every neighbour stencil (potential filling,
+    !      gradients, smoothing padding, flow routing) wraps in a periodic
+    !      direction. With both .FALSE. (the default) nothing changes.
 
     use nml
 
@@ -198,6 +202,10 @@ module fast_hydrology_k24
         ! -- derived, filled by k24_par_load --
         real(dp) :: K                           ! K = (2/pi)^(1/4)*sqrt((pi+2)/(rho_w*f))
 
+        ! -- domain topology (Fortran-only; set by hydro_init, not the namelist) --
+        logical  :: periodic_x                  ! x wraps with period nx (no halo); else edge-clamped
+        logical  :: periodic_y                  ! y wraps with period ny (no halo); else edge-clamped
+
     end type
 
     ! ============================================================
@@ -329,6 +337,11 @@ contains
         par%reg_coulomb_c_till            = 0.0_dp
         par%reg_coulomb_q                 = 1.0_dp / 3.0_dp
         par%reg_coulomb_u0                = 100.0_dp / K24_SEC_PER_YEAR
+
+        ! Bounded domain, the reference's convention. hydro_init sets these
+        ! for a periodic host grid.
+        par%periodic_x                    = .FALSE.
+        par%periodic_y                    = .FALSE.
 
         call nml_read(filename,group,"k24_substrate_type",                par%substrate_type,                init=init_pars,defaults_file=def_file,defaults_group=def_group)
         call nml_read(filename,group,"k24_flux_solver",                   par%flux_solver,                   init=init_pars,defaults_file=def_file,defaults_group=def_group)
@@ -505,7 +518,7 @@ contains
         call update_phi0(wk%phi0, H_ice, z_bed, par)
 
         ! Fill local minima so water does not get stuck.
-        call potential_filling(wk%phi0, wk%phi0_tmp, par%fill_iters)
+        call potential_filling(wk%phi0, wk%phi0_tmp, par%fill_iters, par%periodic_x, par%periodic_y)
 
         ! Ice thickness consistent with the filled potential. Stored separately
         ! so it does not leak into the effective-pressure calculation, which
@@ -519,7 +532,7 @@ contains
         end do
         !$omp end parallel do
 
-        call update_potential_gradients(wk, dx, dy)
+        call update_potential_gradients(wk, dx, dy, par%periodic_x, par%periodic_y)
         call update_smoothed_potential_gradients(wk, dx, dy, mask, par)
 
         ! Correction factor from psi_out to q. Depends only on the (already
@@ -734,16 +747,18 @@ contains
     ! ============================================================
     ! Iterative hollow-filling for spurious sinks
     ! ============================================================
-    subroutine potential_filling(phi0, phi0_tmp, iterations)
+    subroutine potential_filling(phi0, phi0_tmp, iterations, periodic_x, periodic_y)
         ! Mirrors potential_filling! (water_flux.jl). Every cell is visited,
         ! including the domain edges, whose out-of-range neighbours are
         ! edge-replicated (index clamped) -- the same convention
         ! minus_gradient_x!/minus_gradient_y! use. The previous Fortran
-        ! implementation skipped the border ring entirely.
+        ! implementation skipped the border ring entirely. In a periodic
+        ! direction the neighbours wrap instead (Fortran-only).
         implicit none
         real(dp), intent(INOUT) :: phi0(:,:)
         real(dp), intent(INOUT) :: phi0_tmp(:,:)
         integer,  intent(IN)    :: iterations
+        logical,  intent(IN)    :: periodic_x, periodic_y
 
         integer  :: iter, i, j, nx, ny, im1, ip1, jm1, jp1
         real(dp) :: p, p1, p2, p3, p4
@@ -757,8 +772,8 @@ contains
             do j = 1, ny
                 do i = 1, nx
                     p   = phi0(i,j)
-                    im1 = max(i-1, 1);  ip1 = min(i+1, nx)
-                    jm1 = max(j-1, 1);  jp1 = min(j+1, ny)
+                    im1 = max(wrap_index(i-1, nx, periodic_x), 1);  ip1 = min(wrap_index(i+1, nx, periodic_x), nx)
+                    jm1 = max(wrap_index(j-1, ny, periodic_y), 1);  jp1 = min(wrap_index(j+1, ny, periodic_y), ny)
                     p1  = phi0(ip1,j);  p2 = phi0(im1,j)
                     p3  = phi0(i,jp1);  p4 = phi0(i,jm1)
                     if (p < p1 .and. p < p2 .and. p < p3 .and. p < p4) then
@@ -775,16 +790,18 @@ contains
     ! ============================================================
     ! Potential gradients (unsmoothed)
     ! ============================================================
-    subroutine update_potential_gradients(wk, dx, dy)
+    subroutine update_potential_gradients(wk, dx, dy, periodic_x, periodic_y)
         ! Central difference with the neighbour INDEX clamped at the domain
         ! edge (minus_gradient_x!/minus_gradient_y! in grid.jl), i.e. an edge
         ! cell differences itself against its single interior neighbour over
         ! the full 2*dx. The previous Fortran implementation instead copied the
         ! adjacent interior cell's gradient into the border ring, which is a
-        ! different value.
+        ! different value. In a periodic direction the neighbour index wraps
+        ! instead (Fortran-only).
         implicit none
         type(k24_work_class), intent(INOUT) :: wk
         real(dp),             intent(IN)    :: dx, dy
+        logical,              intent(IN)    :: periodic_x, periodic_y
 
         integer :: i, j, nx, ny, im1, ip1, jm1, jp1
 
@@ -793,7 +810,7 @@ contains
         !$omp parallel do default(shared) private(i,j,im1,ip1) schedule(static)
         do j = 1, ny
             do i = 1, nx
-                im1 = max(i-1, 1);  ip1 = min(i+1, nx)
+                im1 = max(wrap_index(i-1, nx, periodic_x), 1);  ip1 = min(wrap_index(i+1, nx, periodic_x), nx)
                 wk%gx(i,j) = -(wk%phi0(ip1,j) - wk%phi0(im1,j)) / (2.0_dp * dx)
             end do
         end do
@@ -801,7 +818,7 @@ contains
 
         !$omp parallel do default(shared) private(i,j,jm1,jp1) schedule(static)
         do j = 1, ny
-            jm1 = max(j-1, 1);  jp1 = min(j+1, ny)
+            jm1 = max(wrap_index(j-1, ny, periodic_y), 1);  jp1 = min(wrap_index(j+1, ny, periodic_y), ny)
             do i = 1, nx
                 wk%gy(i,j) = -(wk%phi0(i,jp1) - wk%phi0(i,jm1)) / (2.0_dp * dy)
             end do
@@ -894,8 +911,8 @@ contains
         kernel_sum = sum(kernel)
         if (kernel_sum > 0.0_dp) kernel = kernel / kernel_sum
 
-        call imfilter_replicate_fftw(wk%gx, nx, ny, kernel, frb_x, frb_y, wk%gsx)
-        call imfilter_replicate_fftw(wk%gy, nx, ny, kernel, frb_x, frb_y, wk%gsy)
+        call imfilter_replicate_fftw(wk%gx, nx, ny, kernel, frb_x, frb_y, wk%gsx, par%periodic_x, par%periodic_y)
+        call imfilter_replicate_fftw(wk%gy, nx, ny, kernel, frb_x, frb_y, wk%gsy, par%periodic_x, par%periodic_y)
 
         ! L1 magnitude, matching abs_grad_phi0_s in water_flux.jl.
         !$omp parallel do default(shared) private(i,j) schedule(static)
@@ -937,11 +954,13 @@ contains
     ! ============================================================
     ! 2-D convolution via FFTW3, "replicate" border.
     ! ============================================================
-    subroutine imfilter_replicate_fftw(input, nx, ny, kernel, frb_x, frb_y, output)
+    subroutine imfilter_replicate_fftw(input, nx, ny, kernel, frb_x, frb_y, output, periodic_x, periodic_y)
         ! Cached_fft_convolve! (fft_convolution.jl) in Fortran: embed the input
         ! in an (nx+2*frb_x, ny+2*frb_y) array with REPLICATE padding (nearest
         ! edge extended), wrap the centred kernel around the array's origin,
-        ! multiply in the frequency domain, and crop back.
+        ! multiply in the frequency domain, and crop back. In a periodic
+        ! direction the padding wraps instead (period n), which makes the
+        ! convolution circular there (Fortran-only).
         !
         ! Two fixes relative to the previous implementation:
         !   * the padding was "reflect"; ImageFiltering's default -- which
@@ -965,6 +984,7 @@ contains
         real(dp), intent(IN)  :: input(nx, ny)
         real(dp), intent(IN)  :: kernel(2*frb_x+1, 2*frb_y+1)
         real(dp), intent(OUT) :: output(nx, ny)
+        logical,  intent(IN)  :: periodic_x, periodic_y
 
         integer :: Npx, Npy, Mfft, Nfft, i, j, ii, jj, ni, nj
         real(C_DOUBLE),            allocatable :: work_a(:,:), work_b(:,:), work_out(:,:)
@@ -982,12 +1002,13 @@ contains
         work_a = 0.0_dp
         work_b = 0.0_dp
 
-        ! Replicate padding: clamp the source index to the domain.
+        ! Replicate padding: clamp the source index to the domain (or wrap it,
+        ! in a periodic direction).
         !$omp parallel do default(shared) private(i,j,ii,jj) schedule(static)
         do j = 1, Npy
             do i = 1, Npx
-                ii = min(max(i - frb_x, 1), nx)
-                jj = min(max(j - frb_y, 1), ny)
+                ii = min(max(wrap_index(i - frb_x, nx, periodic_x), 1), nx)
+                jj = min(max(wrap_index(j - frb_y, ny, periodic_y), 1), ny)
                 work_a(i, j) = input(ii, jj)
             end do
         end do
@@ -1047,6 +1068,21 @@ contains
             m = m + 1
         end do
     end function next_smooth_size
+
+    pure integer function wrap_index(k, n, periodic) result(kw)
+        ! Neighbour index k of a 1..n axis: wrapped with period n in a
+        ! periodic direction, otherwise returned as is (the caller clamps or
+        ! skips an out-of-range index).
+        implicit none
+        integer, intent(IN) :: k, n
+        logical, intent(IN) :: periodic
+
+        if (periodic) then
+            kw = modulo(k-1, n) + 1
+        else
+            kw = k
+        end if
+    end function wrap_index
 
     ! ============================================================
     ! Sliding law -> basal shear stress
@@ -1380,6 +1416,10 @@ contains
     !     topography usually is not (confirmed on Thwaites-2km at every
     !     longcoupwater). Errors on a detected cycle unless
     !     k24_toposort_allow_cycles is set.
+    !
+    ! At a domain edge the out-of-range neighbour is skipped (water crossing
+    ! the edge leaves the domain); in a periodic direction the neighbour index
+    ! wraps to the opposite edge instead.
     subroutine update_psi_out(wk, mask, dx, dy, par)
         implicit none
         type(k24_work_class), intent(INOUT) :: wk
@@ -1472,8 +1512,8 @@ contains
         end if
 
         do d = 1, 4
-            ni = i + K24_DIRS(1,d)
-            nj = j + K24_DIRS(2,d)
+            ni = wrap_index(i + K24_DIRS(1,d), wk%nx, par%periodic_x)
+            nj = wrap_index(j + K24_DIRS(2,d), wk%ny, par%periodic_y)
             if (ni < 1 .or. ni > wk%nx .or. nj < 1 .or. nj > wk%ny) cycle
 
             w = -(wk%gsx(ni,nj) * real(K24_DIRS(1,d), dp) + &
@@ -1558,8 +1598,8 @@ contains
                     else if (sk <= 4) then
 
                         d  = sk
-                        ni = si + K24_DIRS(1,d)
-                        nj = sj + K24_DIRS(2,d)
+                        ni = wrap_index(si + K24_DIRS(1,d), wk%nx, par%periodic_x)
+                        nj = wrap_index(sj + K24_DIRS(2,d), wk%ny, par%periodic_y)
 
                         if (ni < 1 .or. ni > wk%nx .or. nj < 1 .or. nj > wk%ny) then
                             wk%stack_k(top) = sk + 1
@@ -1639,8 +1679,8 @@ contains
             do i = 1, wk%nx
                 if (mask(i,j) /= 1.0_dp) cycle
                 do d = 1, 4
-                    ni = i + K24_DIRS(1,d)
-                    nj = j + K24_DIRS(2,d)
+                    ni = wrap_index(i + K24_DIRS(1,d), wk%nx, par%periodic_x)
+                    nj = wrap_index(j + K24_DIRS(2,d), wk%ny, par%periodic_y)
                     if (ni < 1 .or. ni > wk%nx .or. nj < 1 .or. nj > wk%ny) cycle
                     if (mask(ni,nj) /= 1.0_dp) cycle
 
@@ -1683,8 +1723,8 @@ contains
             wk%psi_out(i,j) = max(0.0_dp, wk%psi_out(i,j) + wk%mdot_total(i,j) * dx * dy)
 
             do d = 1, 4
-                ni = i + K24_DIRS(1,d)
-                nj = j + K24_DIRS(2,d)
+                ni = wrap_index(i + K24_DIRS(1,d), wk%nx, par%periodic_x)
+                nj = wrap_index(j + K24_DIRS(2,d), wk%ny, par%periodic_y)
                 if (ni < 1 .or. ni > wk%nx .or. nj < 1 .or. nj > wk%ny) cycle
                 if (mask(ni,nj) /= 1.0_dp) cycle
 

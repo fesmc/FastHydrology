@@ -5,6 +5,12 @@ Format follows [Keep a Changelog](https://keepachangelog.com/); versioning is [S
 
 ## [Unreleased]
 ### Added
+- Periodic domains: `hydro_init` takes optional `periodic_x`/`periodic_y` (default `.false.`,
+  which leaves every result unchanged). A periodic direction wraps with period `nx`/`ny` and no
+  halo cells: `mask_bc` is not applied to its rim, and the neighbours in `apply_margin_fill` and
+  in every K24 stencil (potential filling, potential gradients, smoothing padding, flow routing)
+  wrap instead of being clamped or skipped. `apply_margin_fill`/`apply_mask_bc` take the same
+  optional flags; K24 carries them in `k24_param_class` (set by `hydro_init`, not the namelist).
 - K24: dissipation-melt source term `|q*grad(phi0)|/(L_w*rho_w)`, resolved by a Picard loop
   (`k24_dissipation_melt`, on by default; `k24_max_dissipation_iters`, `k24_dissipation_rtol`).
 - K24: four sliding laws for the frictional-heating term `tau_b*v_b/(L_w*rho_w)`
