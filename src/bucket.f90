@@ -47,6 +47,8 @@ module fast_hydrology_bucket
     ! Controls how W_til is treated on the outer halo of the domain (the
     ! i=1, i=nx, j=1, j=ny rim of cells). Floating-cell logic is independent
     ! and always applied; grounded-ice-free cells are always set to 0.
+    ! In a periodic direction (hydro_init's periodic_x / periodic_y) the rim
+    ! cells are interior cells, so the BC is not applied there.
     integer, parameter, public :: MASK_BC_ZERO    = 0  ! W_til = 0 at the rim
     integer, parameter, public :: MASK_BC_IMPOSED = 1  ! W_til = par%W_til_bc at the rim
     integer, parameter, public :: MASK_BC_MIRROR  = 2  ! W_til mirrored from the inward neighbor (Neumann)
@@ -218,8 +220,10 @@ contains
     !   * grounded full-ice interior                        -> keep bucket value
     ! The pinned, saturated margin ring acts as a stabilizing BC that keeps the
     ! fast-flow zone clamped to the grounding line (vs blooming inland).
+    ! Neighbours are edge-clamped at the domain border, or wrapped (period
+    ! nx / ny) in a periodic direction.
     ! ------------------------------------------------------------
-    subroutine apply_margin_fill(W_til, f_ice, f_grnd, W_til_max)
+    subroutine apply_margin_fill(W_til, f_ice, f_grnd, W_til_max, periodic_x, periodic_y)
 
         implicit none
 
@@ -227,21 +231,28 @@ contains
         real(wp), intent(IN)    :: f_ice(:,:)
         real(wp), intent(IN)    :: f_grnd(:,:)
         real(wp), intent(IN)    :: W_til_max(:,:)
+        logical,  intent(IN), optional :: periodic_x, periodic_y
 
         integer :: i, j, nx, ny
         integer :: im1, ip1, jm1, jp1
+        logical :: per_x, per_y
 
         nx = size(f_ice,1)
         ny = size(f_ice,2)
+
+        per_x = .false.
+        per_y = .false.
+        if (present(periodic_x)) per_x = periodic_x
+        if (present(periodic_y)) per_y = periodic_y
 
         !$omp parallel do default(shared) private(i,j,im1,ip1,jm1,jp1) schedule(static)
         do j = 1, ny
         do i = 1, nx
 
-            im1 = max(i-1,1)
-            ip1 = min(i+1,nx)
-            jm1 = max(j-1,1)
-            jp1 = min(j+1,ny)
+            im1 = max(wrap_index(i-1,nx,per_x),1)
+            ip1 = min(wrap_index(i+1,nx,per_x),nx)
+            jm1 = max(wrap_index(j-1,ny,per_y),1)
+            jp1 = min(wrap_index(j+1,ny,per_y),ny)
 
             if (f_grnd(i,j) == 0.0_wp) then
                 ! Floating or ice-free ocean point - saturate
@@ -268,41 +279,57 @@ contains
 
     end subroutine apply_margin_fill
 
-    subroutine apply_mask_bc(W_til, mask_bc, W_til_bc)
+    subroutine apply_mask_bc(W_til, mask_bc, W_til_bc, periodic_x, periodic_y)
         ! Apply the domain-border BC at the i=1, i=nx, j=1, j=ny rim.
         ! Acts after the main update and after the floating-cell logic.
+        ! A periodic direction has no border: its rim is left untouched.
 
         implicit none
 
         real(wp), intent(INOUT) :: W_til(:,:)
         integer,  intent(IN)    :: mask_bc
         real(wp), intent(IN)    :: W_til_bc
+        logical,  intent(IN), optional :: periodic_x, periodic_y
 
         integer :: nx, ny
+        logical :: per_x, per_y
 
         nx = size(W_til,1)
         ny = size(W_til,2)
 
+        per_x = .false.
+        per_y = .false.
+        if (present(periodic_x)) per_x = periodic_x
+        if (present(periodic_y)) per_y = periodic_y
+
         select case (mask_bc)
 
             case (MASK_BC_ZERO)
-                W_til(1,:)  = 0.0_wp
-                W_til(nx,:) = 0.0_wp
-                W_til(:,1)  = 0.0_wp
-                W_til(:,ny) = 0.0_wp
+                if (.not. per_x) then
+                    W_til(1,:)  = 0.0_wp
+                    W_til(nx,:) = 0.0_wp
+                end if
+                if (.not. per_y) then
+                    W_til(:,1)  = 0.0_wp
+                    W_til(:,ny) = 0.0_wp
+                end if
 
             case (MASK_BC_IMPOSED)
-                W_til(1,:)  = W_til_bc
-                W_til(nx,:) = W_til_bc
-                W_til(:,1)  = W_til_bc
-                W_til(:,ny) = W_til_bc
+                if (.not. per_x) then
+                    W_til(1,:)  = W_til_bc
+                    W_til(nx,:) = W_til_bc
+                end if
+                if (.not. per_y) then
+                    W_til(:,1)  = W_til_bc
+                    W_til(:,ny) = W_til_bc
+                end if
 
             case (MASK_BC_MIRROR)
-                if (nx >= 2) then
+                if (nx >= 2 .and. .not. per_x) then
                     W_til(1,:)  = W_til(2,:)
                     W_til(nx,:) = W_til(nx-1,:)
                 end if
-                if (ny >= 2) then
+                if (ny >= 2 .and. .not. per_y) then
                     W_til(:,1)  = W_til(:,2)
                     W_til(:,ny) = W_til(:,ny-1)
                 end if
@@ -316,5 +343,22 @@ contains
         return
 
     end subroutine apply_mask_bc
+
+    pure integer function wrap_index(k, n, periodic) result(kw)
+        ! Neighbour index k of a 1..n axis: wrapped with period n in a
+        ! periodic direction, otherwise returned as is (the caller clamps).
+
+        implicit none
+
+        integer, intent(IN) :: k, n
+        logical, intent(IN) :: periodic
+
+        if (periodic) then
+            kw = modulo(k-1, n) + 1
+        else
+            kw = k
+        end if
+
+    end function wrap_index
 
 end module fast_hydrology_bucket
