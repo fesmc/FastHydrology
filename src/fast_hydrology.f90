@@ -30,13 +30,14 @@ module fast_hydrology
     !   mdot, uxy_b                 : SI [m/s]
     !   par%dx, par%dy              : [m]
     ! Internally everything is SI. dt_year (time - hyd%now%time) is computed
-    ! in years for state bookkeeping; dt_sec = dt_year * SEC_PER_YEAR is the
+    ! in years for state bookkeeping; dt_sec = dt_year * par%sec_year is the
     ! denominator used by the bucket update and dW_til_dt / overflow rates.
     !
     ! In all cases, hyd%now%dW_til_dt is computed as the natural-sign change
     ! in W_til over the step: (W_til_new - W_til_old) / dt_sec  [m/s].
 
     use nml
+    use phys_constants, only : phys_const_class, phys_const_get, phys_const_require
     use fast_hydrology_k24
     use fast_hydrology_bucket
     use fast_hydrology_closures
@@ -47,17 +48,14 @@ module fast_hydrology
     integer, parameter :: sp = kind(1.0)
     integer, parameter :: wp = sp
 
-    ! Seconds per year used to convert the API's time argument (years) to
-    ! the internal dt_sec. Match the value in bucket.f90.
-    real(wp), parameter, public :: SEC_PER_YEAR = 3.1556926e7_wp
-
-    ! Physical constants. Hard-coded internally (previously the namelist
-    ! parameters rho_ice / rho_w / g); these are effectively fixed in practice,
-    ! so they are no longer exposed in &yhyd. Propagated into the k24 and
-    ! closure sub-structs in hydro_par_load.
-    real(wp), parameter, public :: RHO_ICE = 917.0_wp    ! [kg/m^3] ice density
-    real(wp), parameter, public :: RHO_W   = 1000.0_wp   ! [kg/m^3] freshwater density
-    real(wp), parameter, public :: G_GRAV  = 9.81_wp     ! [m/s^2]  gravitational acceleration
+    ! Standalone defaults for the calendar year and the physical constants.
+    ! A coupled host overrides them through hydro_init's cnst / sec_year
+    ! arguments, so the library and the host cannot hold two different ice
+    ! densities or two different year lengths. See hydro_param_class.
+    real(wp), parameter :: SEC_PER_YEAR_DEF = 3.1556926e7_wp  ! [s a-1] 365.2422 d
+    real(wp), parameter :: RHO_ICE_DEF      =  917.0_wp       ! [kg m-3]
+    real(wp), parameter :: RHO_W_DEF        = 1000.0_wp       ! [kg m-3]
+    real(wp), parameter :: G_GRAV_DEF       =    9.81_wp      ! [m s-2]
 
     ! ---------- method_til enum (par%method_til) ----------
     integer, parameter, public :: TIL_NONE   = 0    ! host owns W_til; library leaves it alone
@@ -74,6 +72,10 @@ module fast_hydrology
         real(wp) :: dy                ! [m] grid spacing, set from hydro_init argument
         logical  :: periodic_x        ! x wraps with period nx (no halo), set from hydro_init argument
         logical  :: periodic_y        ! y wraps with period ny (no halo), set from hydro_init argument
+        real(wp) :: sec_year          ! [s a-1]  seconds per year; converts hydro_update's time argument to dt_sec
+        real(wp) :: rho_ice           ! [kg m-3] ice density
+        real(wp) :: rho_w             ! [kg m-3] freshwater density
+        real(wp) :: g                 ! [m s-2]  gravitational acceleration
         real(wp) :: W_til_max         ! [m]  scalar default for hyd%now%W_til_max
         integer  :: mask_bc           ! see bucket::MASK_BC_*
         real(wp) :: W_til_bc          ! [m]  imposed W_til at the domain border (MASK_BC_IMPOSED)
@@ -117,7 +119,16 @@ module fast_hydrology
 
 contains
 
-    subroutine hydro_init(hyd, filename, nx, ny, dx, dy, group, periodic_x, periodic_y)
+    subroutine hydro_init(hyd, filename, nx, ny, dx, dy, group, cnst, sec_year, periodic_x, periodic_y)
+        ! cnst supplies the physical constants (rho_ice, rho_w, rho_sw, g,
+        ! L_ice) from the host, so a coupled run has one set rather than one
+        ! here and one there. When it is absent -- the standalone drivers --
+        ! the module defaults and &yhyd apply, unchanged.
+        !
+        ! sec_year is the host's calendar year. It is separate from cnst
+        ! because a year length is a calendar convention, not a physical
+        ! constant, and phys_const_class deliberately carries no such field.
+        !
         ! periodic_x / periodic_y (default .false.) declare a host grid that
         ! wraps in that direction with period nx / ny and no halo cells (the
         ! neighbour of i=1 is i=nx and vice versa). All neighbour stencils
@@ -130,6 +141,8 @@ contains
         integer,           intent(IN)           :: nx, ny
         real(wp),          intent(IN)           :: dx, dy
         character(len=*),  intent(IN), optional :: group
+        type(phys_const_class), intent(IN), optional :: cnst
+        real(wp),          intent(IN), optional :: sec_year
         logical,           intent(IN), optional :: periodic_x, periodic_y
 
         character(len=32) :: nml_group
@@ -141,7 +154,7 @@ contains
             nml_group = "yhyd"
         end if
 
-        call hydro_par_load(hyd%par, filename, nml_group)
+        call hydro_par_load(hyd%par, filename, nml_group, cnst=cnst, sec_year=sec_year)
 
         hyd%par%dx = dx
         hyd%par%dy = dy
@@ -299,7 +312,7 @@ contains
 
         ! API time is in years; convert step to seconds for internal SI.
         dt_year      = max(time - hyd%now%time, 0.0_wp)
-        dt_sec       = dt_year * SEC_PER_YEAR
+        dt_sec       = dt_year * hyd%par%sec_year
         hyd%now%time = time
         hyd%now%dt   = dt_sec
 
@@ -577,16 +590,19 @@ contains
 
     end subroutine calc_N_closure
 
-    subroutine hydro_par_load(par, filename, group, init)
+    subroutine hydro_par_load(par, filename, group, cnst, sec_year, init)
 
         implicit none
 
         type(hydro_param_class), intent(INOUT) :: par
         character(len=*),        intent(IN)    :: filename
         character(len=*),        intent(IN)    :: group
+        type(phys_const_class),  intent(IN), optional :: cnst
+        real(wp),                intent(IN), optional :: sec_year
         logical, optional,       intent(IN)    :: init
 
         logical :: init_pars
+        logical :: host_const
 
         ! Path to the canonical yelmo defaults file. The &yhyd parameters
         ! the user file does not set fall through to this schema; user-file
@@ -596,6 +612,8 @@ contains
 
         init_pars = .FALSE.
         if (present(init)) init_pars = init
+
+        host_const = present(cnst)
 
         call nml_validate(filename,def_file,group,defaults_group=def_group)
 
@@ -609,15 +627,34 @@ contains
         par%mask_bc          = MASK_BC_ZERO
         par%W_til_bc         = 0.0_wp
 
+        ! Calendar year and physical constants: standalone defaults, replaced
+        ! by the host's when it supplies them. Resolved before the sub-struct
+        ! loads, because the bucket needs the year for its m/a -> m/s
+        ! conversion and the closures need to know whether to read
+        ! marine_rho_sw from &yhyd at all.
+        par%sec_year = SEC_PER_YEAR_DEF
+        par%rho_ice  = RHO_ICE_DEF
+        par%rho_w    = RHO_W_DEF
+        par%g        = G_GRAV_DEF
+
+        if (present(sec_year)) par%sec_year = sec_year
+
+        if (host_const) then
+            call phys_const_require(cnst, "hydro_par_load")
+            call phys_const_get(cnst, "rho_ice", par%rho_ice)
+            call phys_const_get(cnst, "rho_w",   par%rho_w)
+            call phys_const_get(cnst, "g",       par%g)
+        end if
+
         call nml_read(filename,group,"method_til",        par%method_til,        init=init_pars,defaults_file=def_file,defaults_group=def_group)
         call nml_read(filename,group,"method_transport",  par%method_transport,  init=init_pars,defaults_file=def_file,defaults_group=def_group)
         call nml_read(filename,group,"W_til_max",         par%W_til_max,         init=init_pars,defaults_file=def_file,defaults_group=def_group)
         call nml_read(filename,group,"mask_bc",           par%mask_bc,           init=init_pars,defaults_file=def_file,defaults_group=def_group)
         call nml_read(filename,group,"W_til_bc",          par%W_til_bc,          init=init_pars,defaults_file=def_file,defaults_group=def_group)
 
-        call bucket_par_load (par%bucket,   filename, group, init=init_pars)
-        call k24_par_load    (par%k24,      filename, group, init=init_pars)
-        call closure_par_load(par%closures, filename, group, init=init_pars)
+        call bucket_par_load (par%bucket,   filename, group, par%sec_year, init=init_pars)
+        call k24_par_load    (par%k24,      filename, group, init=init_pars, skip_phys_const=host_const)
+        call closure_par_load(par%closures, filename, group, init=init_pars, skip_phys_const=host_const)
 
         ! K24 solves N jointly with q as part of its own Picard loop; an
         ! externally-supplied N has nowhere to enter that system, so the
@@ -629,13 +666,20 @@ contains
             stop
         end if
 
-        ! Propagate the hard-coded physical constants into sub-structs so K24
-        ! and closures see a single source of truth.
-        par%k24%ice_density   = real(RHO_ICE, dp)
-        par%k24%water_density = real(RHO_W,   dp)
-        par%k24%gravity       = real(G_GRAV,  dp)
-        par%closures%rho_ice  = RHO_ICE
-        par%closures%g        = G_GRAV
+        ! Propagate the resolved constants into the sub-structs so K24 and the
+        ! closures see a single source of truth. The two the host owns only
+        ! when it supplies cnst (L_ice, rho_sw) are taken there; otherwise the
+        ! sub-struct loads have already set their own.
+        par%k24%ice_density   = real(par%rho_ice, dp)
+        par%k24%water_density = real(par%rho_w,   dp)
+        par%k24%gravity       = real(par%g,       dp)
+        par%closures%rho_ice  = par%rho_ice
+        par%closures%g        = par%g
+
+        if (host_const) then
+            call phys_const_get(cnst, "L_ice",  par%k24%latent_heat_water)
+            call phys_const_get(cnst, "rho_sw", par%closures%marine%rho_sw)
+        end if
 
         ! Refresh everything K24 derives from those densities (currently the
         ! Manning-Strickler / Darcy-Weisbach coefficient K, which depends on

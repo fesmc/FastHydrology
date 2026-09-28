@@ -64,6 +64,7 @@ module fast_hydrology_k24
     !      direction. With both .FALSE. (the default) nothing changes.
 
     use nml
+    use phys_constants, only : sec_year_julian
 
     implicit none
 
@@ -73,12 +74,13 @@ module fast_hydrology_k24
 
     ! Seconds per year used by the parameter defaults FastHydrology.jl writes
     ! as perYear2perSecond(...) -- eta_w and the sliding laws' u0. Julia's
-    ! SECONDS_PER_YEAR is 60^2*24*365.25 (Julian year). Deliberately NOT the
-    ! same constant as fast_hydrology::SEC_PER_YEAR (3.1556926e7, a tropical
-    ! year), which converts the public API's time argument: that one is
-    ! calendar bookkeeping, this one reproduces a Julia default. They differ
-    ! by 0.002%.
-    real(dp), parameter :: K24_SEC_PER_YEAR = 60.0_dp * 60.0_dp * 24.0_dp * 365.25_dp
+    ! SECONDS_PER_YEAR is the Julian year, 60^2*24*365.25. Deliberately NOT
+    ! par%sec_year, the host's calendar year, which converts the public API's
+    ! time argument: that one is calendar bookkeeping and the host owns it,
+    ! this one reproduces a Julia default and is fixed. They differ by 0.002%
+    ! against a tropical year. Taken from phys_constants so the convention is
+    ! named rather than spelled out again.
+    real(dp), parameter :: K24_SEC_PER_YEAR = sec_year_julian
 
     ! ---------- Substrate-type enum (par%substrate_type) ----------
     integer, parameter, public :: K24_SUBSTRATE_HARD  = 0
@@ -257,7 +259,11 @@ contains
     ! ============================================================
     ! Namelist load
     ! ============================================================
-    subroutine k24_par_load(par, filename, group, init)
+    subroutine k24_par_load(par, filename, group, init, skip_phys_const)
+        ! skip_phys_const: the host supplied the physical constants, so
+        ! k24_latent_heat_water is not read from &yhyd -- hydro_par_load sets
+        ! latent_heat_water from the host's L_ice instead, keeping the melt and
+        ! opening terms consistent with the host's energy budget.
 
         implicit none
 
@@ -265,14 +271,19 @@ contains
         character(len=*),      intent(IN)    :: filename
         character(len=*),      intent(IN)    :: group
         logical, optional,     intent(IN)    :: init
+        logical, optional,     intent(IN)    :: skip_phys_const
 
         logical :: init_pars
+        logical :: read_phys_const
 
         character(len=*), parameter :: def_file  = "input/yelmo_defaults.nml"
         character(len=*), parameter :: def_group = "yhyd"
 
         init_pars = .FALSE.
         if (present(init)) init_pars = init
+
+        read_phys_const = .TRUE.
+        if (present(skip_phys_const)) read_phys_const = .not. skip_phys_const
 
         ! Defaults reproduce KazmierczakHydroModel's keyword defaults
         ! (FastHydrology.jl/src/models/kazmierczak2024/model.jl).
@@ -353,7 +364,9 @@ contains
         ! water_density, ice_density, gravity are set from top-level
         ! rho_w / rho_ice / g in hydro_par_load (single source of truth).
         call nml_read(filename,group,"k24_manning_exponent",              par%manning_exponent,              init=init_pars,defaults_file=def_file,defaults_group=def_group)
-        call nml_read(filename,group,"k24_latent_heat_water",             par%latent_heat_water,             init=init_pars,defaults_file=def_file,defaults_group=def_group)
+        if (read_phys_const) then
+            call nml_read(filename,group,"k24_latent_heat_water",             par%latent_heat_water,             init=init_pars,defaults_file=def_file,defaults_group=def_group)
+        end if
         call nml_read(filename,group,"k24_bed_thickness",                 par%bed_thickness,                 init=init_pars,defaults_file=def_file,defaults_group=def_group)
         call nml_read(filename,group,"k24_manning_coefficient_exponent",  par%manning_coefficient_exponent,  init=init_pars,defaults_file=def_file,defaults_group=def_group)
         call nml_read(filename,group,"k24_bed_friction_exponent",         par%bed_friction_exponent,         init=init_pars,defaults_file=def_file,defaults_group=def_group)
@@ -389,7 +402,7 @@ contains
         call nml_read(filename,group,"k24_reg_coulomb_u0",                par%reg_coulomb_u0,                init=init_pars,defaults_file=def_file,defaults_group=def_group)
 
         ! Derived. hydro_par_load overwrites water_density afterwards with the
-        ! top-level RHO_W and calls k24_finalize_par to refresh K.
+        ! top-level par%rho_w and calls k24_finalize_par to refresh K.
         call k24_finalize_par(par)
 
         return

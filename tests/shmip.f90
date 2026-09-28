@@ -20,7 +20,6 @@ program shmip
     integer, parameter :: wp_local = kind(1.0)
     integer, parameter :: dp = kind(1.d0)
 
-    ! SEC_PER_YEAR is exported by fast_hydrology; no local copy needed.
     real(wp_local), parameter :: PI           = 4.0_wp_local * atan(1.0_wp_local)
     integer, parameter        :: N_MOULIN     = 10
 

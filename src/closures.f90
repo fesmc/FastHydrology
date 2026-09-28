@@ -65,7 +65,11 @@ module fast_hydrology_closures
 
 contains
 
-    subroutine closure_par_load(par, filename, group, init)
+    subroutine closure_par_load(par, filename, group, init, skip_phys_const)
+        ! skip_phys_const: the host supplied the physical constants, so
+        ! marine_rho_sw is not read from &yhyd -- hydro_par_load sets
+        ! marine%rho_sw from the host's record instead. A user file may still
+        ! carry the key; it is simply not the source of truth any more.
 
         implicit none
 
@@ -73,14 +77,19 @@ contains
         character(len=*),          intent(IN)    :: filename
         character(len=*),          intent(IN)    :: group
         logical, optional,         intent(IN)    :: init
+        logical, optional,         intent(IN)    :: skip_phys_const
 
         logical :: init_pars
+        logical :: read_phys_const
 
         character(len=*), parameter :: def_file  = "input/yelmo_defaults.nml"
         character(len=*), parameter :: def_group = "yhyd"
 
         init_pars = .FALSE.
         if (present(init)) init_pars = init
+
+        read_phys_const = .TRUE.
+        if (present(skip_phys_const)) read_phys_const = .not. skip_phys_const
 
         par%rho_ice         = 917.0_wp
         par%g               =   9.81_wp
@@ -97,7 +106,9 @@ contains
         ! (single source of truth).
         call nml_read(filename,group,"const_N",        par%N_const,         init=init_pars,defaults_file=def_file,defaults_group=def_group)
         call nml_read(filename,group,"marine_p",       par%marine%p,        init=init_pars,defaults_file=def_file,defaults_group=def_group)
-        call nml_read(filename,group,"marine_rho_sw",  par%marine%rho_sw,   init=init_pars,defaults_file=def_file,defaults_group=def_group)
+        if (read_phys_const) then
+            call nml_read(filename,group,"marine_rho_sw",  par%marine%rho_sw,   init=init_pars,defaults_file=def_file,defaults_group=def_group)
+        end if
         call nml_read(filename,group,"till_N0",        par%till%N0,         init=init_pars,defaults_file=def_file,defaults_group=def_group)
         call nml_read(filename,group,"till_delta",     par%till%delta,      init=init_pars,defaults_file=def_file,defaults_group=def_group)
         call nml_read(filename,group,"till_e0",        par%till%e0,         init=init_pars,defaults_file=def_file,defaults_group=def_group)

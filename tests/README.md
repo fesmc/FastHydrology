@@ -161,7 +161,7 @@ julia --project=/path/to/FastHydrology.jl tests/k24_greenland.jl out_julia.nc \
 julia --project=/path/to/FastHydrology.jl tests/k24_greenland_compare.jl out_fortran.nc out_julia.nc
 ```
 
-The third argument (and `mdotscale=`) is `(rho_ice/rho_w)/SEC_PER_YEAR`, which
+The third argument (and `mdotscale=`) is `(rho_ice/rho_w)/sec_year`, which
 converts the restart's `bmb_grnd` from ice-equivalent m/a to a water-equivalent
 m/s source rate. Both sides must be given the same value. Passing `1.0`
 instead reproduces `examples/greenland/greenland.jl`'s own (unconverted, and

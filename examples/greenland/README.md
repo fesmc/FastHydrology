@@ -103,7 +103,8 @@ Writes `output/greenland_compare.png`.
 - `bmb_grnd` from the restart is in ice-equivalent m/a with Yelmo's
   sign convention (negative when melting). The driver converts to
   a water-equivalent rate in m/s (SI):
-  `mdot = -bmb_grnd * (rho_ice/rho_w) / SEC_PER_YEAR`.
+  `mdot = -bmb_grnd * (rho_ice/rho_w) / sec_year`, all three taken from
+  `hyd%par` after `hydro_init`.
 - `ATT_bar` is used as `A_glen` (depth-averaged rate factor).
 - The K24 internal mask is `f_grnd > 0 .and. f_ice > 0`.
 - The domain border BC is `MASK_BC_ZERO` by default. Edit

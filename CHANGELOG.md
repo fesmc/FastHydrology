@@ -4,6 +4,29 @@ All notable changes to FastHydrology are documented here.
 Format follows [Keep a Changelog](https://keepachangelog.com/); versioning is [SemVer](https://semver.org/).
 
 ## [Unreleased]
+### Changed
+- Physical constants come from the host. `hydro_init` takes an optional `cnst`
+  (fesm-utils `phys_const_class`) and an optional `sec_year`; `hydro_param_class` gains
+  `rho_ice`, `rho_w`, `g` and `sec_year` fields. The module-level `SEC_PER_YEAR`, `RHO_ICE`,
+  `RHO_W` and `G_GRAV` parameters are gone, as is `bucket.f90`'s duplicate `SEC_PER_YEAR`;
+  what were fixed 917 / 1000 / 9.81 / 3.1556926e7 are now standalone *defaults*, used
+  only when the host supplies nothing. With `cnst` present, `rho_sw` (`marine_rho_sw`)
+  and the K24 latent heat (`k24_latent_heat_water`) are taken from the record and no
+  longer read from `&yhyd`. **No result change standalone**: the defaults are the old
+  values, and the drivers pass no `cnst`. Under Yelmo the five constants are unchanged as
+  well: `yhyd_par_load` was already overwriting every one of them after the fact, so the
+  difference is that they are now right from the start instead of patched afterwards. The
+  year is the one thing Yelmo was *not* overriding -- it imported this module's
+  `SEC_PER_YEAR` instead -- so a domain whose `&Earth sec_year` is not 3.1556926e7 (of the
+  bundled par files, only MISMIP3D) now converts the hydrology rates with its own year
+  rather than silently with this one.
+- `K24_SEC_PER_YEAR` is now `phys_constants`' `sec_year_julian` rather than a spelled-out
+  `60^2*24*365.25`. Same value; it stays the Julian year deliberately, to reproduce
+  FastHydrology.jl's `perYear2perSecond` defaults, and is not the host's calendar year.
+- `examples/greenland`: the `bmb_grnd` -> `mdot` conversion uses `hyd%par%rho_ice`,
+  `hyd%par%rho_w` and `hyd%par%sec_year` instead of its own 917 / 1000 / year literals,
+  so the driver and the library cannot disagree.
+
 ### Added
 - Periodic domains: `hydro_init` takes optional `periodic_x`/`periodic_y` (default `.false.`,
   which leaves every result unchanged). A periodic direction wraps with period `nx`/`ny` and no

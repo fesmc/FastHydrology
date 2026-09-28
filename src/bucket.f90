@@ -38,11 +38,6 @@ module fast_hydrology_bucket
     integer, parameter :: sp = kind(1.0)
     integer, parameter :: wp = sp
 
-    ! Seconds per year used for namelist unit conversion. Match the value
-    ! used in fast_hydrology (kept in two places to avoid the cross-module
-    ! coupling for a single literal).
-    real(wp), parameter :: SEC_PER_YEAR = 3.1556926e7_wp
-
     ! ---------- Domain-border BC enum (par%mask_bc) ----------
     ! Controls how W_til is treated on the outer halo of the domain (the
     ! i=1, i=nx, j=1, j=ny rim of cells). Floating-cell logic is independent
@@ -81,13 +76,14 @@ module fast_hydrology_bucket
 
 contains
 
-    subroutine bucket_par_load(par, filename, group, init)
+    subroutine bucket_par_load(par, filename, group, sec_year, init)
 
         implicit none
 
         type(bucket_param_class), intent(INOUT) :: par
         character(len=*),         intent(IN)    :: filename
         character(len=*),         intent(IN)    :: group
+        real(wp),                 intent(IN)    :: sec_year   ! [s a-1] resolved by hydro_par_load
         logical, optional,        intent(IN)    :: init
 
         logical :: init_pars
@@ -108,7 +104,7 @@ contains
         call nml_read(filename,group,"bkt_floating_mode", par%floating_mode, init=init_pars,defaults_file=def_file,defaults_group=def_group)
 
         ! Convert till_rate from namelist units (m/a) to internal SI (m/s).
-        par%till_rate = par%till_rate / SEC_PER_YEAR
+        par%till_rate = par%till_rate / sec_year
 
         return
 

@@ -68,13 +68,6 @@ program greenland
     call nc_read(restart_file, "ATT_bar",  A_glen,   start=[1,1,1], count=[nx,ny,1])
     call nc_read(restart_file, "bmb_grnd", bmb_grnd, start=[1,1,1], count=[nx,ny,1])
 
-    ! Convert bmb_grnd (ice-equivalent m/a, sign convention: positive =
-    ! accumulation) to a water-equivalent source rate (m/s, SI) for the
-    ! library:
-    !   mdot = -bmb_grnd * (rho_ice / rho_w) / SEC_PER_YEAR.
-    ! Yelmo's sign convention has bmb_grnd negative when melting; flip it.
-    mdot = -bmb_grnd * (917.0_wp_local / 1000.0_wp_local) / SEC_PER_YEAR
-
     ! Build mask: K24 / BUCKET active where grounded ice exists.
     where (f_grnd > 0.0_wp_local .and. f_ice > 0.0_wp_local)
         mask = 1.0_wp_local
@@ -91,6 +84,15 @@ program greenland
     call hydro_init(hyd, nml_file, nx, ny, &
                     dx_km * 1000.0_wp_local, dy_km * 1000.0_wp_local)
     call hydro_init_state(hyd, H_ice, z_bed, f_ice, f_grnd, 0.0_wp_local)
+
+    ! Convert bmb_grnd (ice-equivalent m/a, sign convention: positive =
+    ! accumulation) to a water-equivalent source rate (m/s, SI) for the
+    ! library:
+    !   mdot = -bmb_grnd * (rho_ice / rho_w) / sec_year.
+    ! Yelmo's sign convention has bmb_grnd negative when melting; flip it.
+    ! Taken from hyd%par after init, so this driver converts with exactly the
+    ! densities and year the library resolved rather than its own copies.
+    mdot = -bmb_grnd * (hyd%par%rho_ice / hyd%par%rho_w) / hyd%par%sec_year
 
     write(*,'(a,i0,a)') "  method_til       = ", hyd%par%method_til, " (0=NONE 1=BUCKET)"
     write(*,'(a,i0,a)') "  method_transport = ", hyd%par%method_transport, " (0=NONE 1=K24)"
