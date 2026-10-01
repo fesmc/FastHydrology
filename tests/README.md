@@ -52,7 +52,7 @@ is generated rather than committed.
 Two things this dataset exercises that the others do not:
 
 - **The `max_psi_out_calls` cutoff actually binds.** 51945 grounded cells
-  exceeds the default 50000, so the routing is truncated part-way. Raising
+  exceeds the default 100000, so the routing is truncated part-way. Raising
   `k24_max_psi_out_calls` to 400000 changes the answer materially (mean `q`
   2.1409e-4 -> 2.1763e-4, mean `N` 1.3807e6 -> 1.3119e6) — and both
   implementations move together to 10 significant figures, so the truncation
@@ -61,7 +61,7 @@ Two things this dataset exercises that the others do not:
 - **The flow-direction graph is genuinely cyclic.** The topological router
   leaves 26938 of 51945 grounded cells (51.9%) unprocessed, matching
   `TopologicalPsiOut`'s own docstring ("roughly half of all grounded cells at
-  the model's default `longcoupwater = 5.0`"). Its answer is therefore very
+  the old default `longcoupwater = 5.0`, i.e. `coupling_length_kamb86 = 10`"). Its answer is therefore very
   different from the recursive/iterative one (mean `q` 1.28e-5 vs 2.14e-4) —
   both implementations agree on it exactly, but that agreement is not a reason
   to use it on real data.
@@ -107,9 +107,16 @@ julia --project=/path/to/FastHydrology.jl tests/k24_synth_compare.jl out_fortran
 ```
 
 `tests/k24_synth.jl` takes `key=value` overrides matching the namelist
-switches: `substrate`, `drainage`, `wthick`, `grad`, `longcoup`, `psi`,
-`dissip`, `sliding`, `ctill`, `input`. Set the corresponding `k24_*` keys in
-the namelist to the same values and the two must agree.
+switches: `substrate`, `drainage`, `wthick`, `grad`, `kamb86`, `routing`,
+`fill`, `qconv`, `dissdisc`, `friction`, `psi`, `dissip`, `sliding`, `ctill`,
+`input`, plus `qtfrac`/`iebfrac` (the source terms), which `k24_synth.x` also
+reads from its own arguments. Set the corresponding `k24_*` keys in the
+namelist to the same values and the two must agree.
+
+The water source is built from terms on both sides from the fixture's volume
+rate `mdot`: `G = mdot*rho_w*L_w`, `q_T = qtfrac*G`, `i_eb = iebfrac*mdot*rho_w`.
+The fields some options need (C-grid velocities, a `tau_b` field, a per-cell
+Coulomb coefficient) are derived from `vb` the same way on both sides.
 
 To regenerate the input fixture (needs Julia only):
 
@@ -133,12 +140,19 @@ materially above that is a regression. The configurations covered:
 | `laminar_mean`, `laminar_local` | the laminar `W` closure, both gradient conventions |
 | `areal` | the areal-conduit `W` closure |
 | `darcy_local` | Darcy-Weisbach `W` with the local gradient |
-| `longcoup0` | smoothing disabled (bypasses the FFT convolution entirely) |
-| `longcoup1` | a different smoothing kernel size |
-| `iterative` | the explicit-stack flow router |
-| `nodissip` | dissipation melt off (single routing pass, no Picard loop) |
-| `weertman` | an N-independent sliding law |
-| `powerplastic`, `regcoulomb` | N-dependent sliding laws, i.e. the joint (q, N) Picard loop |
+| `kamb86_0` | smoothing disabled (bypasses the FFT convolution entirely) |
+| `kamb86_4` | a different smoothing kernel size |
+| `nodissip`, `warner_nodiss` | dissipation melt off (single routing pass, no Picard loop) |
+| `weertman`, `field` | N-independent sliding laws (the second a prescribed `tau_b` field) |
+| `powerplastic`, `regcoulomb`, `regcoulfield`, `shakti` | N-dependent sliding laws, i.e. the joint (q, N) Picard loop |
+| `terms_qT_ieb` | a nonzero `q_T` and water from above `i_eb` in the source |
+| `stagger`, `stagger_quad` | C-grid frictional heat, on faces and at Gauss points |
+| `gdswarner`, `gds_recursive`, `gds_iterative`, `gds_face` | the original K24 routing through each flow router, and with face fluxes |
+| `quinn`, `quinn_orig`, `tarboton`, `modtarboton`, `gdstarboton` | the other Le Brocq et al. (2006) routing schemes |
+| `warner_jacobi`, `warner_lowest`, `warner_outflow` | the default Warner routing with the other fill algorithms and `q` conversion |
+
+Every case except the `gds*` ones runs the default Warner routing with
+priority-flood filling, face-average `q` and face dissipation.
 
 ## `k24_greenland.f90` — the same cross-validation on real data
 

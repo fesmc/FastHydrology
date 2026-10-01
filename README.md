@@ -18,18 +18,23 @@ are handled, run sequentially each step.
 | `method_transport` | what runs on `W` (distributed sheet) and `N`            |
 |-------------------:|---------------------------------------------------------|
 | `0` NONE           | `W = 0`, `q_x = q_y = 0`; `N` from `bucket%N_closure`   |
-| `1` K24            | Kazmierczak 2024 distributed model: `W`, `q_x`, `q_y`, `N`, `p_w` |
+| `1` K24            | Kazmierczak 2024 distributed model: `W`, `q_x`, `q_y`, `N`, `p_w`, `Q_b`, `Q_diss` |
 
-The till step runs first. When BUCKET is on, any source `mdot` that does
-not fit under `W_til_max` spills over to feed the transport step as its
-source. With `W_til_max = 0` the bucket holds nothing and all source
-flows through to transport. EXTERNAL is the coupling-friendly mode that
-lets a host own `W_til` and use FastHydrology only for `N` and/or
-transport. Notation follows van Pelt & Bueler 2015:
+The till step runs first and is driven by `mdot`. K24 does not take `mdot`:
+its water source is built from the terms of the basal melt rate -- the
+geothermal heat `G` and the heat conducted into the ice `q_T`, plus the
+frictional heat `Q_b` and the dissipation heat `Q_diss` it computes itself
+-- and the water reaching the bed from above, `i_eb` (drained englacial
+water, surface input), which is routed but is not melt. The bucket overflow
+no longer feeds K24. EXTERNAL is the coupling-friendly mode that lets a host
+own `W_til` and use FastHydrology only for `N` and/or transport. Notation
+follows van Pelt & Bueler 2015:
 
 - `W_til` : till water storage thickness   [m]
 - `W`     : distributed sheet thickness    [m]
-- `mdot`  : source rate from ice base      [m/s, water-equivalent]
+- `mdot`  : bucket source rate             [m/s, water-equivalent]
+- `G`, `q_T` : geothermal heat into the bed, conductive heat into the ice [W/m2]
+- `i_eb`  : water reaching the bed from above [m/s, water-equivalent]
 
 All internal units are SI. The public API takes `time` in years (matching
 typical ice-sheet model conventions); namelist `bkt_till_rate` is in m/a
@@ -98,14 +103,23 @@ default reproduces a `KazmierczakHydroModel` constructor keyword, and each
 parameter's own comment in `input/yelmo_defaults.nml` names the Julia field it
 maps to.
 
-Two conventions differ deliberately:
+The water source is built exactly as in FastHydrology.jl, as a mass rate
+[kg/m2/s]: `mdot_total = (G - q_T + Q_b + Q_diss)/L_w + i_eb`, seeded into the
+routing as `mdot_total*dx*dy/rho_w`. Only the public `hydro_update` takes
+`i_eb` as a water-equivalent volume rate [m/s], like the rest of the Fortran
+API, and converts it.
 
-- **Units.** FastHydrology.jl carries the melt rate as a mass rate [kg/m2/s]
-  and divides by `rho_w` when seeding the flow routing. This library carries it
-  as the water-equivalent volume rate `mdot` [m/s] used everywhere else in the
-  Fortran API, so every melt-like source term picks up an extra `1/rho_w`
-  (`tau_b*v_b/(L_w*rho_w)` rather than `tau_b*v_b/L_w`, and likewise for the
-  dissipation term). Everything else is SI and identical.
+The routing options of FastHydrology.jl are all available: `k24_routing_scheme`
+(Warner by default, GDS-Warner the original K24/KORI scheme, Quinn, Tarboton,
+modified and GDS Tarboton; Le Brocq et al. 2006), `k24_fill_algorithm`,
+`k24_q_conversion`, `k24_dissipation_discretization`, the taped flow router
+(`k24_flux_solver = 3`, the default; the recursive, iterative and topological
+routers implement GDS-Warner only), the staggered (C-grid) frictional heat
+(`k24_friction_discretization`) and the field-valued sliding laws (prescribed
+`tau_b`, a per-cell Coulomb coefficient, Shakti's regularized Coulomb law).
+
+Deliberate deviations:
+
 - **Degenerate cases.** The reference lets IEEE arithmetic produce `Inf`/`NaN`
   at cells where `Q == 0`, `S_inf == 0` or `N_inf == 0` and then overwrites
   them; this library takes the same limits by an explicit branch instead, since
@@ -120,8 +134,8 @@ particular guard real numerical edge cases, so turning them off is a genuine
 tradeoff rather than a free simplification.
 
 The port is verified against the Julia implementation on identical inputs by
-`tests/k24_synth.f90` (18 configurations, agreeing to ~1e-15 in double
-precision) and `tests/k24_greenland.f90` (the real 16 km restart, ~1e-7 through
+`tests/k24_synth.f90` (every configuration in `tests/k24_crossvalidate.sh`,
+agreeing to ~1e-15 in double precision) and `tests/k24_greenland.f90` (the real 16 km restart, ~1e-7 through
 the `real(sp)` public API). See `tests/README.md`.
 
 ## SHMIP driver

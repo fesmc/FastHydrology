@@ -8,8 +8,8 @@
 # mirrors, so this is the direct reference.
 #
 # Usage: julia k24_compare.jl <out.nc> [key=value ...]
-#   wthick=darcy|laminar|areal   grad=mean|local   longcoup=<float>
-#   psi=recursive|iterative|topological            dissip=true|false
+#   wthick=darcy|laminar|areal   grad=mean|local   kamb86=<float>
+#   psi=taped|recursive|iterative|topological      dissip=true|false
 #   sliding=none|weertman|powerplastic|regcoulomb
 #   substrate=hard|soft|mixed
 
@@ -51,6 +51,10 @@ close(ds)
 # physically-scaled forcing; it must match k24_compare.f90's 3rd argument.
 mdot_scale = parse(Float64, get_cfg("mdotscale", "1.0"))
 mdot = -bmb_grnd .* mdot_scale .* 1000.0
+# The source is built from terms: the same melt, supplied as geothermal heat
+# G = mdot*L_w [W/m2], as k24_greenland.f90 does through hydro_update.
+G   = -bmb_grnd .* mdot_scale .* 1000.0 .* 3.34e5
+q_T = zeros(Nx, Ny)
 
 # Bed-type indicator, mirroring initialize_kappa in k24.f90.
 substrate = get_cfg("substrate", "hard")
@@ -71,11 +75,12 @@ water_thickness_algorithm =
     wthick == "areal"   ? ArealConduitThickness() :
                           DarcyWeisbachThickness(gradient_convention = grad_conv)
 
-psi = get_cfg("psi", "recursive")
+psi = get_cfg("psi", "taped")
 psi_out_algorithm =
+    psi == "recursive"   ? RecursivePsiOut() :
     psi == "iterative"   ? IterativePsiOut() :
     psi == "topological" ? TopologicalPsiOut(allow_cycles = true) :
-                           RecursivePsiOut()
+                           TapedPsiOut()
 
 dm = get_cfg("drainage", "both")
 drainage_mode =
@@ -90,15 +95,15 @@ sliding_law =
     sl == "weertman"     ? WeertmanSlidingLaw(C = 1.0e5) :
     sl == "powerplastic" ? PowerPlasticSlidingLaw(c_till = ctill) :
     sl == "regcoulomb"   ? RegularizedCoulombSlidingLaw(c_till = ctill) :
-                           PrescribedFrictionSlidingLaw()
+                           NoFrictionSlidingLaw()
 
 xlims, ylims = FastHydrology.compute_lims(x, y)
 
 grid  = ArrayHydroGrid(Nx, Ny, xlims, ylims; T = Float64)
 @info "config" Nx Ny dx=grid.dx substrate wthick grad_conv=get_cfg("grad","mean") psi sl
 
-model = KazmierczakHydroModel(grid, kappa, abs_v_b, A_visc, mdot;
-    longcoupwater             = parse(Float64, get_cfg("longcoup", "5.0")),
+model = KazmierczakHydroModel(grid, kappa, abs_v_b, A_visc, G, q_T;
+    coupling_length_kamb86    = parse(Float64, get_cfg("kamb86", "10.0")),
     water_thickness_algorithm = water_thickness_algorithm,
     psi_out_algorithm         = psi_out_algorithm,
     drainage_mode             = drainage_mode,

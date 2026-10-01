@@ -46,7 +46,7 @@
 
     ! -- mode selectors --
     k24_substrate_type               = 0        ! 0=HARD 1=SOFT 2=MIXED (Fortran-only; builds kappa)
-    k24_flux_solver                  = 0        ! psi_out_algorithm: 0=RECURSIVE 1=ITERATIVE 2=TOPOSORT
+    k24_flux_solver                  = 3        ! psi_out_algorithm: 0=RECURSIVE 1=ITERATIVE 2=TOPOSORT
     k24_toposort_allow_cycles        = False    ! TopologicalPsiOut(allow_cycles=...)
     k24_drainage_mode                = 0        ! 0=BOTH 1=EFFICIENT_ONLY 2=INEFFICIENT_ONLY
     k24_water_thickness_algorithm    = 0        ! 0=DARCY_WEISBACH 1=LAMINAR 2=AREAL_CONDUIT
@@ -64,7 +64,7 @@
     k24_critical_discharge           = 1.0      ! Q_c [m3/s]
     k24_initial_cavity_height        = 0.1      ! H_0 [m]
     k24_coupling_length              = 1.0e4    ! l_c, conduit spacing [m]
-    k24_long_coupling_water          = 5.0      ! longcoupwater; 0 disables the smoothing entirely
+    k24_coupling_length_kamb86       = 10.0      ! Kamb & Echelmeyer (1986) coupling length / ice thickness; 0 disables the smoothing entirely
     k24_eta_w                        = 5.703855806525211e-11 ! eta_w [Pa s] = 1.8e-3 per year
 
     ! -- clamps. The schema default (input/yelmo_defaults.nml) leaves all four
@@ -80,7 +80,7 @@
 
     ! -- solver configuration --
     k24_fill_iters                   = 10       ! fill_iters
-    k24_max_psi_out_calls            = 50000    ! max_psi_out_calls
+    k24_max_psi_out_calls            = 100000   ! max_psi_out_calls
     k24_dissipation_melt             = True     ! add |q*grad(phi0)|/(L_w*rho_w) to the source
     k24_max_dissipation_iters        = 20       ! max_dissipation_iters
     k24_dissipation_rtol             = 1.0e-12  ! dissipation_rtol

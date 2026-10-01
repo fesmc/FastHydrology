@@ -15,19 +15,24 @@ module fast_hydrology
     !   method_transport : how the distributed sheet W is computed
     !       TRANSPORT_NONE : W = 0, q_x = q_y = 0. N comes from the bucket's
     !                        N_closure (overburden / marine / till / ...).
-    !       TRANSPORT_K24  : Kazmierczak 2024 distributed model with
-    !                        FFT-smoothed gradients. Writes W, q_x, q_y, N,
-    !                        p_w. The K24 source is the bucket overflow
-    !                        (TIL_BUCKET) or raw mdot (TIL_NONE).
+    !       TRANSPORT_K24  : Kazmierczak 2024 distributed model. Writes W,
+    !                        q_x, q_y, N, p_w, Q_b, Q_diss. Its water source
+    !                        is built from the terms of the melt rate (G, q_T,
+    !                        and the friction and dissipation heat it computes
+    !                        itself) plus the water from above i_eb -- never
+    !                        from mdot, which only drives the bucket.
     !
     ! Notation follows van Pelt & Bueler 2015 (BvP15):
     !   W_til : till water storage thickness   [m]
     !   W     : distributed sheet thickness    [m]
-    !   mdot  : source rate from ice base      [m/s, water-equivalent]
+    !   mdot  : bucket source rate             [m/s, water-equivalent]
+    !   G, q_T: geothermal heat into the bed / conductive heat into the ice [W/m2]
+    !   i_eb  : water reaching the bed from above, not melted there
+    !           (drained englacial water, surface input) [m/s, water-equivalent]
     !
     ! Time / unit convention on the public API:
     !   hydro_update(... time, ...) : time in YEARS (matches host model)
-    !   mdot, uxy_b                 : SI [m/s]
+    !   mdot, i_eb, uxy_b, ux_b, uy_b : SI [m/s];  G, q_T : [W/m2]
     !   par%dx, par%dy              : [m]
     ! Internally everything is SI. dt_year (time - hyd%now%time) is computed
     ! in years for state bookkeeping; dt_sec = dt_year * par%sec_year is the
@@ -108,8 +113,10 @@ module fast_hydrology
         ! Heat fluxes are positive when heat goes into the ice-water
         ! interface; a term that is switched off stays zero.
         real(wp), allocatable :: C_frz(:,:)        ! [m/s]    freeze-on capacity, ice equivalent
+        real(wp), allocatable :: Q_b(:,:)          ! [W/m2]   frictional heat used by the hydrology (K24)
         real(wp), allocatable :: Q_diss(:,:)       ! [W/m2]   heat dissipated by the water flow
         real(wp), allocatable :: Q_sens(:,:)       ! [W/m2]   sensible heat of the water flow
+        real(dp), allocatable :: diss_face(:,:)    ! [kg/m2/s] K24 face-assembled dissipation, warm start between steps
     end type
 
     type hydro_class
@@ -253,6 +260,9 @@ contains
         hyd%now%q_x       = 0.0_wp
         hyd%now%q_y       = 0.0_wp
         hyd%now%q         = 0.0_wp
+        hyd%now%Q_b       = 0.0_wp
+        hyd%now%Q_diss    = 0.0_wp
+        hyd%now%diss_face = 0.0_dp
 
         ! Start from the overburden pressure (p_w = 0 above)
         call hydro_calc_N_overburden(hyd%now%N, H_ice, f_ice, f_grnd, &
@@ -267,15 +277,22 @@ contains
     end subroutine hydro_init_state
 
     subroutine hydro_update(hyd, H_ice, z_bed, z_sl, f_ice, f_grnd, mask, &
-                            mdot, uxy_b, A_glen, time)
+                            mdot, G, q_T, i_eb, uxy_b, A_glen, time, &
+                            ux_b, uy_b, taub, c_till)
         ! Advance one step. Flow:
         !   1. Till step (method_til):
-        !        BUCKET   -> updates W_til; produces hyd%now%overflow
+        !        BUCKET   -> updates W_til from mdot; produces hyd%now%overflow
         !        EXTERNAL -> leaves W_til alone; overflow = mdot
         !   2. Transport step (method_transport):
         !        NONE -> W, q_x, q_y zeroed
-        !        K24  -> calc_k24 with source = hyd%now%overflow,
-        !                writes W, q_x, q_y, N, p_w
+        !        K24  -> calc_k24 with the source built from its terms
+        !                (G, q_T, i_eb; friction and dissipation computed
+        !                inside), writes W, q_x, q_y, N, p_w, Q_b, Q_diss.
+        !                The bucket overflow does not feed K24.
+        !   Optional inputs, needed only by some K24 options:
+        !        ux_b, uy_b : C-grid basal velocities [m/s] (staggered friction)
+        !        taub       : basal shear stress magnitude [Pa] (prescribed-field law)
+        !        c_till     : per-cell Coulomb coefficient (regularized-Coulomb-field law)
         !   3. N closure:
         !        K24 active -> N already set by K24 (skip)
         !        otherwise  -> apply par%bucket%N_closure on the current W_til
@@ -292,13 +309,19 @@ contains
         real(wp),          intent(IN)    :: f_grnd(:,:)
         real(wp),          intent(IN)    :: mask(:,:)
         real(wp),          intent(IN)    :: mdot(:,:)
+        real(wp),          intent(IN)    :: G(:,:)
+        real(wp),          intent(IN)    :: q_T(:,:)
+        real(wp),          intent(IN)    :: i_eb(:,:)
         real(wp),          intent(IN)    :: uxy_b(:,:)
         real(wp),          intent(IN)    :: A_glen(:,:)
         real(wp),          intent(IN)    :: time
+        real(wp),          intent(IN), optional :: ux_b(:,:), uy_b(:,:), taub(:,:), c_till(:,:)
 
         ! dp scratch arrays for the K24 boundary
         real(dp), allocatable :: H_ice_dp(:,:), z_bed_dp(:,:), mask_dp(:,:)
-        real(dp), allocatable :: src_dp(:,:), uxy_b_dp(:,:), A_glen_dp(:,:)
+        real(dp), allocatable :: G_dp(:,:), q_T_dp(:,:), i_eb_dp(:,:), uxy_b_dp(:,:), A_glen_dp(:,:)
+        real(dp), allocatable :: ux_b_dp(:,:), uy_b_dp(:,:), taub_dp(:,:), c_till_dp(:,:)
+        real(dp), allocatable :: Q_b_dp(:,:), Q_diss_dp(:,:)
         real(dp), allocatable :: kappa_dp(:,:)
         real(dp), allocatable :: q_x_dp(:,:), q_y_dp(:,:), N_dp(:,:), p_w_dp(:,:), W_dp(:,:)
         real(dp), allocatable :: q_dp(:,:)
@@ -360,7 +383,9 @@ contains
             case (TRANSPORT_K24)
                 if (dt_sec > 0.0_wp) then
                     allocate(H_ice_dp(nx,ny), z_bed_dp(nx,ny), mask_dp(nx,ny))
-                    allocate(src_dp(nx,ny), uxy_b_dp(nx,ny), A_glen_dp(nx,ny))
+                    allocate(G_dp(nx,ny), q_T_dp(nx,ny), i_eb_dp(nx,ny), uxy_b_dp(nx,ny), A_glen_dp(nx,ny))
+                    allocate(ux_b_dp(nx,ny), uy_b_dp(nx,ny), taub_dp(nx,ny), c_till_dp(nx,ny))
+                    allocate(Q_b_dp(nx,ny), Q_diss_dp(nx,ny))
                     allocate(kappa_dp(nx,ny))
                     allocate(q_x_dp(nx,ny), q_y_dp(nx,ny), N_dp(nx,ny), p_w_dp(nx,ny), W_dp(nx,ny))
                     allocate(q_dp(nx,ny))
@@ -368,8 +393,16 @@ contains
                     H_ice_dp  = real(H_ice,           dp)
                     z_bed_dp  = real(z_bed,           dp)
                     mask_dp   = real(mask,            dp)
-                    src_dp    = real(hyd%now%overflow,dp)
+                    G_dp      = real(G,               dp)
+                    q_T_dp    = real(q_T,             dp)
+                    ! i_eb: water-equivalent volume rate [m/s] -> mass rate [kg/m2/s]
+                    i_eb_dp   = real(i_eb,            dp) * real(hyd%par%rho_w, dp)
                     uxy_b_dp  = real(uxy_b,           dp)
+                    ux_b_dp   = 0.0_dp; uy_b_dp = 0.0_dp; taub_dp = 0.0_dp; c_till_dp = 0.0_dp
+                    if (present(ux_b))   ux_b_dp   = real(ux_b,   dp)
+                    if (present(uy_b))   uy_b_dp   = real(uy_b,   dp)
+                    if (present(taub))   taub_dp   = real(taub,   dp)
+                    if (present(c_till)) c_till_dp = real(c_till, dp)
                     A_glen_dp = real(A_glen,          dp)
                     kappa_dp  = real(hyd%now%kappa,   dp)
 
@@ -379,10 +412,26 @@ contains
                     q_dp      = real(hyd%now%q,       dp)
                     N_dp      = real(hyd%now%N,       dp)
 
-                    call calc_k24(q_x_dp, q_y_dp, N_dp, p_w_dp, W_dp, q_dp, &
-                                  H_ice_dp, z_bed_dp, mask_dp, src_dp, uxy_b_dp, A_glen_dp, &
-                                  kappa_dp, &
-                                  real(hyd%par%dx, dp), real(hyd%par%dy, dp), hyd%par%k24)
+                    ! The optional fields are passed only when the host
+                    ! supplied them; calc_k24 stops if an option needs one
+                    ! that is missing.
+                    if (present(ux_b) .and. present(uy_b) .and. present(taub) .and. present(c_till)) then
+                        call calc_k24(q_x_dp, q_y_dp, N_dp, p_w_dp, W_dp, q_dp, Q_b_dp, Q_diss_dp, &
+                                      H_ice_dp, z_bed_dp, mask_dp, G_dp, q_T_dp, i_eb_dp, uxy_b_dp, A_glen_dp, &
+                                      kappa_dp, real(hyd%par%dx, dp), real(hyd%par%dy, dp), hyd%par%k24, &
+                                      ux_b=ux_b_dp, uy_b=uy_b_dp, tau_b_in=taub_dp, c_till_in=c_till_dp, &
+                                      diss_io=hyd%now%diss_face)
+                    else if (present(ux_b) .and. present(uy_b)) then
+                        call calc_k24(q_x_dp, q_y_dp, N_dp, p_w_dp, W_dp, q_dp, Q_b_dp, Q_diss_dp, &
+                                      H_ice_dp, z_bed_dp, mask_dp, G_dp, q_T_dp, i_eb_dp, uxy_b_dp, A_glen_dp, &
+                                      kappa_dp, real(hyd%par%dx, dp), real(hyd%par%dy, dp), hyd%par%k24, &
+                                      ux_b=ux_b_dp, uy_b=uy_b_dp, diss_io=hyd%now%diss_face)
+                    else
+                        call calc_k24(q_x_dp, q_y_dp, N_dp, p_w_dp, W_dp, q_dp, Q_b_dp, Q_diss_dp, &
+                                      H_ice_dp, z_bed_dp, mask_dp, G_dp, q_T_dp, i_eb_dp, uxy_b_dp, A_glen_dp, &
+                                      kappa_dp, real(hyd%par%dx, dp), real(hyd%par%dy, dp), hyd%par%k24, &
+                                      diss_io=hyd%now%diss_face)
+                    end if
 
                     hyd%now%q_x = real(q_x_dp, wp)
                     hyd%now%q_y = real(q_y_dp, wp)
@@ -390,9 +439,12 @@ contains
                     hyd%now%N   = real(N_dp,   wp)
                     hyd%now%p_w = real(p_w_dp, wp)
                     hyd%now%W   = real(W_dp,   wp)
+                    hyd%now%Q_b    = real(Q_b_dp,    wp)
+                    hyd%now%Q_diss = real(Q_diss_dp, wp)
 
                     deallocate(H_ice_dp, z_bed_dp, mask_dp)
-                    deallocate(src_dp, uxy_b_dp, A_glen_dp)
+                    deallocate(G_dp, q_T_dp, i_eb_dp, uxy_b_dp, A_glen_dp)
+                    deallocate(ux_b_dp, uy_b_dp, taub_dp, c_till_dp, Q_b_dp, Q_diss_dp)
                     deallocate(kappa_dp)
                     deallocate(q_x_dp, q_y_dp, N_dp, p_w_dp, W_dp)
                     deallocate(q_dp)
@@ -719,7 +771,9 @@ contains
         allocate(now%N(nx,ny))
         allocate(now%kappa(nx,ny))
         allocate(now%C_frz(nx,ny))
+        allocate(now%Q_b(nx,ny))
         allocate(now%Q_diss(nx,ny))
+        allocate(now%diss_face(nx,ny))
         allocate(now%Q_sens(nx,ny))
 
         now%W_til     = 0.0_wp
@@ -734,7 +788,9 @@ contains
         now%N         = 0.0_wp
         now%kappa     = 0.0_wp
         now%C_frz     = 0.0_wp
+        now%Q_b       = 0.0_wp
         now%Q_diss    = 0.0_wp
+        now%diss_face = 0.0_dp
         now%Q_sens    = 0.0_wp
 
         return
@@ -759,7 +815,9 @@ contains
         if (allocated(now%N))         deallocate(now%N)
         if (allocated(now%kappa))     deallocate(now%kappa)
         if (allocated(now%C_frz))     deallocate(now%C_frz)
+        if (allocated(now%Q_b))       deallocate(now%Q_b)
         if (allocated(now%Q_diss))    deallocate(now%Q_diss)
+        if (allocated(now%diss_face)) deallocate(now%diss_face)
         if (allocated(now%Q_sens))    deallocate(now%Q_sens)
 
         return

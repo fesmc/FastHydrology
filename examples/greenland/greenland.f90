@@ -22,6 +22,7 @@ program greenland
     real(wp_local), allocatable :: f_ice(:,:), f_grnd(:,:), mask(:,:)
     real(wp_local), allocatable :: bmb_grnd(:,:), uxy_b(:,:), A_glen(:,:)
     real(wp_local), allocatable :: mdot(:,:)
+    real(wp_local), allocatable :: G(:,:), q_T(:,:), i_eb(:,:)
 
     type(hydro_class) :: hyd
     real(wp_local)    :: time, dx_km, dy_km
@@ -94,6 +95,13 @@ program greenland
     ! densities and year the library resolved rather than its own copies.
     mdot = -bmb_grnd * (hyd%par%rho_ice / hyd%par%rho_w) / hyd%par%sec_year
 
+    ! K24 builds its source from terms. This restart has the melt rate only,
+    ! so the same melt is supplied as geothermal heat G = mdot*rho_w*L_w.
+    allocate(G(nx,ny), q_T(nx,ny), i_eb(nx,ny))
+    G    = mdot * hyd%par%rho_w * real(hyd%par%k24%latent_heat_water, wp_local)
+    q_T  = 0.0_wp_local
+    i_eb = 0.0_wp_local
+
     write(*,'(a,i0,a)') "  method_til       = ", hyd%par%method_til, " (0=NONE 1=BUCKET)"
     write(*,'(a,i0,a)') "  method_transport = ", hyd%par%method_transport, " (0=NONE 1=K24)"
     write(*,'(a,i0)')   "  N_clos           = ", hyd%par%bucket%N_closure
@@ -118,7 +126,7 @@ program greenland
         time   = time + dt_step
         n_step = n_step + 1
         call hydro_update(hyd, H_ice, z_bed, z_sl, f_ice, f_grnd, mask, &
-                          mdot, uxy_b, A_glen, time)
+                          mdot, G, q_T, i_eb, uxy_b, A_glen, time)
 
         if (mod(n_step, n_out) == 0 .or. time >= t_end) then
             i_out = i_out + 1

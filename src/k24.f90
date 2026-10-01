@@ -2,20 +2,21 @@ module fast_hydrology_k24
     ! K24 effective-pressure / water-flux model (Kazmierczak et al 2024,
     ! https://doi.org/10.5194/tc-18-5887-2024).
     !
-    ! Diagnostic only: reads ice geometry, bed, melt, sliding speed and Glen
-    ! rate factor; returns the distributed water flux magnitude q (and its
-    ! components q_x, q_y), the effective pressure N, the water pressure
-    ! p_w = Po - N, and the reportable water-layer thickness W. Does not touch
-    ! the till storage W_til, which is owned by the bucket model.
+    ! Diagnostic only: reads ice geometry, bed, the terms of the basal melt
+    ! rate, sliding speed and Glen rate factor; returns the distributed water
+    ! flux magnitude q (and its components q_x, q_y), the effective pressure N,
+    ! the water pressure p_w = Po - N, the reportable water-layer thickness W
+    ! and the frictional and dissipation heat it used. Does not touch the till
+    ! storage W_til, which is owned by the bucket model.
     !
     ! ============================================================
     ! Reference implementation
     ! ============================================================
     ! This module is a line-by-line port of the `kazmierczak2024` model in
     ! TakisAngelides/FastHydrology.jl (src/models/kazmierczak2024/{model,
-    ! water_flux,effective_pressure,sliding_law}.jl). Where the two could
-    ! differ, the Julia side is the source of truth. The call sequence mirrors
-    ! `update_steady_state!` in run.jl:
+    ! water_flux,routing,effective_pressure,sliding_law}.jl). Where the two
+    ! could differ, the Julia side is the source of truth. The call sequence
+    ! mirrors `update_steady_state!` in run.jl:
     !
     !     update_q  ->  update_N  ->  update_W
     !
@@ -26,23 +27,21 @@ module fast_hydrology_k24
     ! (1e-8 / 0.015 / 0.02 / 1e5 m2/yr) through the namelist if you want them.
     !
     ! ============================================================
-    ! Units convention (differs from the Julia reference on purpose)
+    ! Water source: built from its terms
     ! ============================================================
-    ! FastHydrology.jl carries the melt rate as a MASS rate [kg/m2/s] and
-    ! divides by rho_w when seeding psi_out. This library carries it as a
-    ! water-equivalent VOLUME rate `mdot` [m/s], matching bucket.f90 and the
-    ! rest of the Fortran API, so the seed is simply mdot*dx*dy and every
-    ! melt-like source term picked up from the Julia side acquires an extra
-    ! 1/rho_w:
+    ! The melt rate is never supplied whole. calc_k24 takes the geothermal
+    ! heat G and the conductive heat into the ice q_T [W/m2], and the water
+    ! reaching the bed from above i_eb (drained englacial water, surface
+    ! input; Sommers et al 2018's i_eb) [kg/m2/s], and computes the frictional
+    ! heat Q_b and the dissipation heat Q_diss [W/m2] itself:
     !
-    !     Julia   mdot_total += tau_b*v_b/L_w            [kg/m2/s]
-    !     Fortran mdot_total += tau_b*v_b/(L_w*rho_w)    [m/s]
+    !     mdot_fixed = (G - q_T) / L_w
+    !     mdot_total = mdot_fixed + (Q_b + Q_diss) / L_w + i_eb     [kg/m2/s]
     !
-    !     Julia   mdot_total += |q*grad(phi0)|/L_w       [kg/m2/s]
-    !     Fortran mdot_total += |q*grad(phi0)|/(L_w*rho_w)
-    !
-    ! Everything else (q [m2/s], Q [m3/s], N/Po/phi0 [Pa], W [m]) is SI and
-    ! identical to the Julia side.
+    ! mdot_fixed + (Q_b + Q_diss)/L_w is the basal melt rate; i_eb is routed
+    ! with it but is not melt. Q_b and Q_diss depend on the water flux (through
+    ! N and q), so they are recomputed every Picard sweep. The routed volume
+    ! flux is seeded with mdot_total*dx*dy/rho_w [m3/s], as in Julia.
     !
     ! ============================================================
     ! Deliberate deviations from FastHydrology.jl
@@ -51,17 +50,22 @@ module fast_hydrology_k24
     !   1. Degenerate 0/0 and x/0 forms that Julia leaves to IEEE arithmetic
     !      (S_inf with Q == 0, N_inf with S_inf == 0, N with N_inf == 0) are
     !      resolved by an explicit branch here, taking the same limit Julia's
-    !      own `overwrite_where!` cleanups take. This library is built with
-    !      -Ofast (-fp-model fast=2), under which Inf/NaN propagation is not
-    !      reliable, so the branch is both safer and closer to intent.
+    !      own cleanups take. This library is built with -Ofast
+    !      (-fp-model fast=2), under which Inf/NaN propagation is not reliable.
     !   2. `masked_mean` over an empty mask returns 0 here rather than NaN.
     !   3. psi_out is zeroed over the whole grid at the start of every sweep.
     !      Julia's persists across calls, so its non-grounded cells carry stale
     !      values; nothing downstream reads them on either side.
     !   4. Periodic domains (par%periodic_x/periodic_y, set by hydro_init) have
     !      no Julia counterpart: every neighbour stencil (potential filling,
-    !      gradients, smoothing padding, flow routing) wraps in a periodic
-    !      direction. With both .FALSE. (the default) nothing changes.
+    !      gradients, smoothing padding, routing weights, flow routing, face
+    !      fluxes, staggered friction) wraps in a periodic direction, and the
+    !      priority-flood fill has no outlet on a periodic edge. With both
+    !      .FALSE. (the default) nothing changes.
+    !   5. The workspace is call-scoped, so the face-assembled dissipation that
+    !      Julia keeps in model.routing_tape between solves is passed in and out
+    !      through the optional `diss_io` argument instead (hydro_update keeps
+    !      it in hyd%now%diss_face).
 
     use nml
     use phys_constants, only : sec_year_julian
@@ -73,13 +77,10 @@ module fast_hydrology_k24
     real(dp), parameter :: K24_PI = 3.14159265358979323846_dp
 
     ! Seconds per year used by the parameter defaults FastHydrology.jl writes
-    ! as perYear2perSecond(...) -- eta_w and the sliding laws' u0. Julia's
-    ! SECONDS_PER_YEAR is the Julian year, 60^2*24*365.25. Deliberately NOT
-    ! par%sec_year, the host's calendar year, which converts the public API's
-    ! time argument: that one is calendar bookkeeping and the host owns it,
-    ! this one reproduces a Julia default and is fixed. They differ by 0.002%
-    ! against a tropical year. Taken from phys_constants so the convention is
-    ! named rather than spelled out again.
+    ! as perYear2perSecond(...) -- eta_w, the sliding laws' u0 and the
+    ! staggered-friction velocity floor. Julia's SECONDS_PER_YEAR is the Julian
+    ! year, 60^2*24*365.25. Deliberately NOT par%sec_year, the host's calendar
+    ! year, which converts the public API's time argument.
     real(dp), parameter :: K24_SEC_PER_YEAR = sec_year_julian
 
     ! ---------- Substrate-type enum (par%substrate_type) ----------
@@ -87,13 +88,50 @@ module fast_hydrology_k24
     integer, parameter, public :: K24_SUBSTRATE_SOFT  = 1
     integer, parameter, public :: K24_SUBSTRATE_MIXED = 2
 
-    ! ---------- Flow-routing enum (par%flux_solver) ----------
+    ! ---------- Flow-routing algorithm enum (par%flux_solver) ----------
     ! Mirrors AbstractPsiOutAlgorithm in FastHydrology.jl/model.jl.
-    ! NOTE: the numbering changed in this release -- TOPOSORT moved from 1 to
-    ! 2 to make room for ITERATIVE, matching Julia's own ordering.
+    ! RECURSIVE/ITERATIVE/TOPOSORT implement the GDS_WARNER routing only;
+    ! every other routing scheme needs TAPED (the default).
     integer, parameter, public :: K24_FLUX_RECURSIVE = 0   ! RecursivePsiOut
     integer, parameter, public :: K24_FLUX_ITERATIVE = 1   ! IterativePsiOut
     integer, parameter, public :: K24_FLUX_TOPOSORT  = 2   ! TopologicalPsiOut
+    integer, parameter, public :: K24_FLUX_TAPED     = 3   ! TapedPsiOut (default)
+
+    ! ---------- Routing-scheme enum (par%routing_scheme) ----------
+    ! Mirrors AbstractRoutingScheme: the schemes compared by Le Brocq, Payne &
+    ! Siegert (2006). GDS_WARNER is the original K24/KORI routing.
+    integer, parameter, public :: K24_ROUTE_WARNER            = 0  ! Warner (default)
+    integer, parameter, public :: K24_ROUTE_GDS_WARNER        = 1  ! GDSWarner
+    integer, parameter, public :: K24_ROUTE_QUINN             = 2  ! Quinn (k24_quinn_original)
+    integer, parameter, public :: K24_ROUTE_TARBOTON          = 3  ! Tarboton
+    integer, parameter, public :: K24_ROUTE_MODIFIED_TARBOTON = 4  ! ModifiedTarboton
+    integer, parameter, public :: K24_ROUTE_GDS_TARBOTON      = 5  ! GDSTarboton
+
+    ! ---------- Fill-algorithm enum (par%fill_algorithm) ----------
+    ! Mirrors AbstractFillAlgorithm. AUTO follows the routing scheme: JACOBI
+    ! for the GDS schemes, PRIORITY_FLOOD otherwise.
+    integer, parameter, public :: K24_FILL_AUTO             = -1
+    integer, parameter, public :: K24_FILL_JACOBI           =  0  ! JacobiFill
+    integer, parameter, public :: K24_FILL_LOWEST_NEIGHBOUR =  1  ! LowestNeighbourFill
+    integer, parameter, public :: K24_FILL_PRIORITY_FLOOD   =  2  ! PriorityFloodFill (k24_priority_flood_epsilon)
+
+    ! ---------- q-conversion enum (par%q_conversion) ----------
+    ! Mirrors AbstractQConversion. AUTO: FACE_AVERAGE for WARNER, else OUTFLOW.
+    integer, parameter, public :: K24_QCONV_AUTO         = -1
+    integer, parameter, public :: K24_QCONV_OUTFLOW      =  0  ! QFromOutflow
+    integer, parameter, public :: K24_QCONV_FACE_AVERAGE =  1  ! QFromFaceAverage
+
+    ! ---------- Dissipation-discretization enum (par%dissipation_discretization) ----------
+    ! Mirrors AbstractDissipationDiscretization. AUTO: FACE for WARNER, else CELL.
+    integer, parameter, public :: K24_DISS_AUTO = -1
+    integer, parameter, public :: K24_DISS_CELL =  0  ! CellCentredDissipation
+    integer, parameter, public :: K24_DISS_FACE =  1  ! FaceDissipation
+
+    ! ---------- Friction-discretization enum (par%friction_discretization) ----------
+    ! Mirrors AbstractFrictionDiscretization. STAGGERED needs the C-grid
+    ! velocities ux_b/uy_b (acx/acy) passed to calc_k24.
+    integer, parameter, public :: K24_FRICTION_CELL      = 0  ! CellCentredFriction (default)
+    integer, parameter, public :: K24_FRICTION_STAGGERED = 1  ! StaggeredFriction (k24_friction_quadrature)
 
     ! ---------- Drainage-mode enum (par%drainage_mode) ----------
     ! Mirrors AbstractDrainageMode. Note the Q_c limits below are the
@@ -104,43 +142,47 @@ module fast_hydrology_k24
     integer, parameter, public :: K24_DRAINAGE_INEFFICIENT = 2  ! InefficientOnly (Q_c -> Inf)
 
     ! ---------- Water-thickness closure enum (par%water_thickness_algorithm) ----------
-    ! Mirrors AbstractWaterThicknessAlgorithm.
     integer, parameter, public :: K24_WTHICK_DARCY_WEISBACH = 0  ! DarcyWeisbachThickness (default)
     integer, parameter, public :: K24_WTHICK_LAMINAR        = 1  ! LaminarThickness
     integer, parameter, public :: K24_WTHICK_AREAL_CONDUIT  = 2  ! ArealConduitThickness
 
     ! ---------- Gradient-convention enum (par%gradient_convention) ----------
-    ! Mirrors AbstractGradientConvention; applies to the two sheet-flow
-    ! closures (Darcy-Weisbach, laminar) only.
     integer, parameter, public :: K24_GRAD_MEAN  = 0  ! MeanGradient (default)
     integer, parameter, public :: K24_GRAD_LOCAL = 1  ! LocalGradient
 
     ! ---------- Sliding-law enum (par%sliding_law) ----------
-    ! Mirrors AbstractSlidingLaw. PRESCRIBED_FRICTION/WEERTMAN do not depend on
-    ! N; the other two do, and switch resolve_q to the joint (q, N) Picard loop.
-    ! PRESCRIBED_FRICTION does not mean "no friction" -- tau_b = 0 from this
-    ! subroutine's point of view, but whatever frictional heating exists is
-    ! assumed to already be in the supplied mdot, with no (q, N) feedback for
-    ! it (see par%mdot_includes_friction below for using a real sliding law's
-    ! tau_b/N feedback while mdot still already includes friction from elsewhere).
-    integer, parameter, public :: K24_SLIDING_PRESCRIBED_FRICTION = 0  ! PrescribedFrictionSlidingLaw (default)
-    integer, parameter, public :: K24_SLIDING_WEERTMAN      = 1  ! WeertmanSlidingLaw
-    integer, parameter, public :: K24_SLIDING_POWER_PLASTIC = 2  ! PowerPlasticSlidingLaw
-    integer, parameter, public :: K24_SLIDING_REG_COULOMB   = 3  ! RegularizedCoulombSlidingLaw
+    ! Mirrors AbstractSlidingLaw. NO_FRICTION/WEERTMAN/PRESCRIBED_FIELD do not
+    ! depend on N; the others do, and switch resolve_q to the joint (q, N)
+    ! Picard loop. PRESCRIBED_FIELD needs tau_b_in and REG_COULOMB_FIELD needs
+    ! c_till_in passed to calc_k24; SHAKTI_REG_COULOMB uses
+    ! lambda = k24_shakti_lambda_coeff * A_glen.
+    integer, parameter, public :: K24_SLIDING_NO_FRICTION       = 0  ! NoFrictionSlidingLaw (default, tau_b = 0)
+    integer, parameter, public :: K24_SLIDING_WEERTMAN          = 1  ! WeertmanSlidingLaw
+    integer, parameter, public :: K24_SLIDING_POWER_PLASTIC     = 2  ! PowerPlasticSlidingLaw
+    integer, parameter, public :: K24_SLIDING_REG_COULOMB       = 3  ! RegularizedCoulombSlidingLaw
+    integer, parameter, public :: K24_SLIDING_PRESCRIBED_FIELD  = 4  ! PrescribedFieldSlidingLaw
+    integer, parameter, public :: K24_SLIDING_REG_COULOMB_FIELD = 5  ! RegularizedCoulombFieldSlidingLaw
+    integer, parameter, public :: K24_SLIDING_SHAKTI_REG_COULOMB = 6 ! ShaktiRegularizedCoulombSlidingLaw
 
     ! ============================================================
     ! Parameters (runtime, namelist-overridable)
     ! ============================================================
     ! The Julia field each entry corresponds to is named in the trailing
-    ! comment. Namelist keys keep their historical Fortran spellings so
-    ! existing configuration files stay valid, even where Julia's name is the
-    ! clearer one (k24_manning_exponent is Glen's n; k24_bed_thickness is the
-    ! bed obstacle height h_b).
+    ! comment.
     type k24_param_class
 
         ! -- mode selectors --
         integer  :: substrate_type              ! (Fortran-only; builds kappa)
         integer  :: flux_solver                 ! psi_out_algorithm
+        integer  :: routing_scheme              ! routing_scheme
+        logical  :: quinn_original              ! Quinn(original = ...)
+        integer  :: fill_algorithm              ! fill_algorithm (AUTO follows routing_scheme)
+        real(dp) :: priority_flood_epsilon      ! PriorityFloodFill(epsilon = ...) [Pa]
+        integer  :: q_conversion                ! q_conversion (AUTO follows routing_scheme)
+        integer  :: dissipation_discretization  ! dissipation_discretization (AUTO follows routing_scheme)
+        integer  :: friction_discretization     ! friction_discretization
+        logical  :: friction_quadrature         ! StaggeredFriction(quadrature = ...)
+        real(dp) :: friction_u_floor            ! StaggeredFriction(u_floor = ...) [m/s]
         integer  :: drainage_mode               ! drainage_mode
         integer  :: water_thickness_algorithm   ! water_thickness_algorithm
         integer  :: gradient_convention         ! DarcyWeisbach/Laminar gradient_convention
@@ -161,7 +203,8 @@ module fast_hydrology_k24
         real(dp) :: critical_discharge          ! Q_c    [m3/s]
         real(dp) :: initial_cavity_height       ! H_0    [m]
         real(dp) :: coupling_length             ! l_c    conduit spacing [m]
-        real(dp) :: long_coupling_water         ! longcoupwater
+        real(dp) :: coupling_length_kamb86      ! coupling_length_kamb86: Kamb & Echelmeyer (1986) stress-gradient-
+                                                 ! coupling length as a multiple of mean ice thickness (>= 0; 0 disables)
         real(dp) :: min_pressure_fraction       ! sigmat
         real(dp) :: eta_w                       ! eta_w  [Pa s]
 
@@ -172,7 +215,7 @@ module fast_hydrology_k24
         real(dp) :: q_max                       ! q_max [m2/s]
 
         ! -- solver configuration --
-        integer  :: fill_iters                  ! fill_iters
+        integer  :: fill_iters                  ! fill_iters (JACOBI / LOWEST_NEIGHBOUR)
         integer  :: max_psi_out_calls           ! max_psi_out_calls
         integer  :: max_dissipation_iters       ! max_dissipation_iters
         real(dp) :: dissipation_rtol            ! dissipation_rtol
@@ -181,14 +224,6 @@ module fast_hydrology_k24
         integer  :: max_coupling_iters          ! max_coupling_iters
         real(dp) :: coupling_rtol               ! coupling_rtol
         logical  :: coupling_verbose            ! coupling_verbose
-        logical  :: mdot_includes_friction      ! mdot_includes_friction: mdot already includes a
-                                                 ! friction estimate of its own, so resolve_q must not
-                                                 ! add tau_b*uxy_b/(L_w*rho_w) again. Independent of
-                                                 ! sliding_law: tau_b/N still update every sweep for a
-                                                 ! real (possibly N-dependent) sliding law even when
-                                                 ! this is .TRUE. -- only the addition to mdot_total is
-                                                 ! skipped. See AbstractMdotFriction's docstring in the
-                                                 ! Julia model.jl for the full mechanism.
 
         ! -- sliding-law parameters, one set per law so each keeps Julia's own
         !    per-law default (the velocity exponent q differs between them) --
@@ -198,11 +233,19 @@ module fast_hydrology_k24
         real(dp) :: power_plastic_q             ! PowerPlasticSlidingLaw.q
         real(dp) :: power_plastic_u0            ! PowerPlasticSlidingLaw.u0 [m/s]
         real(dp) :: reg_coulomb_c_till          ! RegularizedCoulombSlidingLaw.c_till
-        real(dp) :: reg_coulomb_q               ! RegularizedCoulombSlidingLaw.q
-        real(dp) :: reg_coulomb_u0              ! RegularizedCoulombSlidingLaw.u0 [m/s]
+        real(dp) :: reg_coulomb_q               ! RegularizedCoulomb(Field)SlidingLaw.q
+        real(dp) :: reg_coulomb_u0              ! RegularizedCoulomb(Field)SlidingLaw.u0 [m/s]
+        real(dp) :: shakti_C                    ! ShaktiRegularizedCoulombSlidingLaw.C
+        real(dp) :: shakti_n                    ! ShaktiRegularizedCoulombSlidingLaw.n
+        real(dp) :: shakti_lambda_coeff         ! lambda = shakti_lambda_coeff * A_glen
 
-        ! -- derived, filled by k24_par_load --
+        ! -- derived, filled by k24_finalize_par --
         real(dp) :: K                           ! K = (2/pi)^(1/4)*sqrt((pi+2)/(rho_w*f))
+        real(dp) :: long_coupling_water         ! longcoupwater = coupling_length_kamb86/2 (KORI-ULB's own parameter)
+        integer  :: fill_alg                    ! fill_algorithm with AUTO resolved
+        integer  :: q_conv                      ! q_conversion with AUTO resolved
+        integer  :: diss_disc                   ! dissipation_discretization with AUTO resolved
+        integer  :: n_dirs                      ! 4 or 8 neighbour directions of routing_scheme
 
         ! -- domain topology (Fortran-only; set by hydro_init, not the namelist) --
         logical  :: periodic_x                  ! x wraps with period nx (no halo); else edge-clamped
@@ -213,35 +256,47 @@ module fast_hydrology_k24
     ! ============================================================
     ! Scratch workspace
     ! ============================================================
-    ! Mirrors KazmierczakWorkspace. Allocated at the top of calc_k24 and
-    ! released at the end, the same lifetime the previous implementation gave
-    ! its local arrays -- the cost is negligible next to the FFT convolution
-    ! and the flow routing, and keeping it call-scoped keeps calc_k24 free of
-    ! hidden state.
+    ! Mirrors KazmierczakWorkspace (and its RoutingTape). Allocated at the
+    ! top of calc_k24 and released at the end.
     type k24_work_class
         integer :: nx = 0
         integer :: ny = 0
         ! geometric potential
-        real(dp), allocatable :: phi0(:,:), phi0_tmp(:,:), h(:,:)
-        real(dp), allocatable :: gx(:,:),  gy(:,:),  abs_g(:,:)      ! unsmoothed
-        real(dp), allocatable :: gsx(:,:), gsy(:,:), abs_gs(:,:)     ! smoothed
+        real(dp), allocatable :: phi0(:,:), phi0_filled(:,:), phi0_tmp(:,:), h(:,:)
+        real(dp), allocatable :: gx(:,:),  gy(:,:),  abs_g(:,:)      ! gx/gy: filled potential; abs_g: true potential
+        real(dp), allocatable :: gsx(:,:), gsy(:,:), abs_gs(:,:)     ! routing directions (smoothed for the GDS schemes)
         ! water flux
-        real(dp), allocatable :: mdot_total(:,:), psi_out(:,:), corfac(:,:)
-        real(dp), allocatable :: q_prev(:,:), N_prev(:,:), tau_b(:,:)
+        real(dp), allocatable :: mdot_fixed(:,:), mdot_total(:,:), psi_out(:,:), corfac(:,:)
+        real(dp), allocatable :: q_prev(:,:), N_prev(:,:), tau_b(:,:), lambda(:,:)
+        real(dp), allocatable :: Q_b(:,:), Q_diss(:,:)
         integer,  allocatable :: visited(:,:)
+        ! routing weights / face fluxes / face dissipation (routing.jl)
+        real(dp), allocatable :: w8(:,:,:)        ! w8(d,i,j): fraction of (i,j)'s outflow sent in direction d
+        real(dp), allocatable :: Fx(:,:)          ! (nx+1,ny) net x-face volume fluxes [m3/s]
+        real(dp), allocatable :: Fy(:,:)          ! (nx,ny+1) net y-face volume fluxes [m3/s]
+        real(dp), allocatable :: diss(:,:)        ! face-assembled dissipation melt [kg/m2/s]
+        ! routing tape (TapedPsiOut)
+        logical :: tape_valid = .FALSE.
+        integer :: tape_n = 0
+        integer,  allocatable :: t_dst_i(:), t_dst_j(:), t_src_i(:), t_src_j(:)
+        real(dp), allocatable :: t_w(:)
         ! effective pressure
         real(dp), allocatable :: Q(:,:), S_inf(:,:)
         real(dp), allocatable :: H_hard(:,:), H_soft(:,:), H_cond(:,:)
         real(dp), allocatable :: N_inf(:,:), Po(:,:)
-        ! routing scratch (iterative / topological solvers)
+        ! routing scratch (iterative / topological solvers, tape recorder, priority flood)
         integer,  allocatable :: in_degree(:,:)
         integer,  allocatable :: stack_i(:), stack_j(:), stack_k(:)
     end type
 
-    ! Direction offsets, in the order accumulate_psi_out! iterates them.
-    ! Accumulation is order-dependent in floating point, so this order is part
-    ! of the numerics, not an implementation detail.
-    integer, parameter :: K24_DIRS(2,4) = reshape([ -1, 0,  1, 0,  0, -1,  0, 1 ], [2,4])
+    ! Direction offsets, ROUTE_OFFSETS in routing.jl. The first four are the
+    ! order accumulate_psi_out! iterates them. Accumulation is order-dependent
+    ! in floating point, so this order is part of the numerics.
+    integer, parameter :: K24_DIRS(2,8) = reshape([ -1, 0,  1, 0,  0, -1,  0, 1, &
+                                                     -1,-1,  1,-1, -1,  1,  1, 1 ], [2,8])
+    integer, parameter :: K24_OPPOSITE(8) = [2, 1, 4, 3, 8, 7, 6, 5]
+    ! Tarboton (1997) triangular facets as (cardinal, diagonal) direction pairs.
+    integer, parameter :: K24_FACETS(2,8) = reshape([2,6, 2,8, 4,8, 4,7, 1,7, 1,5, 3,5, 3,6], [2,8])
 
     private
     public :: k24_param_class
@@ -249,10 +304,6 @@ module fast_hydrology_k24
     public :: k24_finalize_par
     public :: initialize_kappa
     public :: calc_k24
-    public :: update_psi_out                 ! dispatcher
-    public :: update_psi_out_recursive       ! exposed for testing/comparison
-    public :: update_psi_out_iterative       ! exposed for testing/comparison
-    public :: update_psi_out_toposort        ! exposed for testing/comparison
 
 contains
 
@@ -285,21 +336,29 @@ contains
         read_phys_const = .TRUE.
         if (present(skip_phys_const)) read_phys_const = .not. skip_phys_const
 
-        ! Defaults reproduce KazmierczakHydroModel's keyword defaults
-        ! (FastHydrology.jl/src/models/kazmierczak2024/model.jl).
         par%substrate_type                = K24_SUBSTRATE_HARD
-        par%flux_solver                   = K24_FLUX_RECURSIVE
+        par%flux_solver                   = K24_FLUX_TAPED
+        par%routing_scheme                = K24_ROUTE_WARNER
+        par%quinn_original                = .FALSE.
+        par%fill_algorithm                = K24_FILL_AUTO
+        par%priority_flood_epsilon        = 1.0_dp
+        par%q_conversion                  = K24_QCONV_AUTO
+        par%dissipation_discretization    = K24_DISS_AUTO
+        par%friction_discretization       = K24_FRICTION_CELL
+        par%friction_quadrature           = .FALSE.
+        ! u_floor = perYear2perSecond(1e-3), Yelmo's ub_sq_min
+        par%friction_u_floor              = 1.0e-3_dp / K24_SEC_PER_YEAR
         par%drainage_mode                 = K24_DRAINAGE_BOTH
         par%water_thickness_algorithm     = K24_WTHICK_DARCY_WEISBACH
         par%gradient_convention           = K24_GRAD_MEAN
-        par%sliding_law                   = K24_SLIDING_PRESCRIBED_FRICTION
+        par%sliding_law                   = K24_SLIDING_NO_FRICTION
         par%toposort_allow_cycles         = .FALSE.
 
         par%water_density                 = 1000.0_dp
         par%ice_density                   =  917.0_dp
         par%gravity                       =    9.81_dp
         par%manning_exponent              =    3.0_dp
-        ! L_w = 3.34e5 (KAZMIERCZAK_DEFAULT_L_W). Was 3.35e5 before this port.
+        ! L_w = 3.34e5 (KAZMIERCZAK_DEFAULT_L_W).
         par%latent_heat_water             =    3.34e5_dp
         par%bed_thickness                 =    0.1_dp
         par%manning_coefficient_exponent  =    1.25_dp      ! alpha = 5/4
@@ -309,25 +368,24 @@ contains
         par%critical_discharge            =    1.0_dp
         par%initial_cavity_height         =    0.1_dp
         par%coupling_length               =    1.0e4_dp
-        par%long_coupling_water           =    5.0_dp
+        ! Upper edge of Kamb & Echelmeyer's 4-10x ice-thickness range for ice
+        ! sheets (~1-3x valley glaciers, ~12x surging). 0 at grids coarser
+        ! than the coupling length.
+        par%coupling_length_kamb86        =   10.0_dp
         ! sigmat = 0 -- no N_inf floor. Pass 0.02 for KORI-ULB's own value.
         par%min_pressure_fraction         =    0.0_dp
         ! eta_w = perYear2perSecond(1.8e-3): KORI-ULB's par.waterviscosity is a
-        ! per-year quantity, so it needs the same conversion as every other
-        ! per-year input. Was the bare 1.8e-3 before this port -- a factor of
-        ! ~3.16e7 too large.
+        ! per-year quantity.
         par%eta_w                         = 1.8e-3_dp / K24_SEC_PER_YEAR
 
-        ! The four KORI-ULB clamps, off by default (Julia's Wmin/Wmax/q_min/
-        ! q_max defaults). huge() stands in for Inf: min(huge, x) == x for any
-        ! finite x, without relying on Inf surviving -Ofast.
+        ! The four KORI-ULB clamps, off by default. huge() stands in for Inf.
         par%W_min                         =    0.0_dp
         par%W_max                         = huge(1.0_dp)
         par%q_min                         =    0.0_dp
         par%q_max                         = huge(1.0_dp)
 
         par%fill_iters                    =   10
-        par%max_psi_out_calls             = 50000
+        par%max_psi_out_calls             = 100000
         par%max_dissipation_iters         =   20
         par%dissipation_rtol              = 1.0e-12_dp
         par%dissipation_melt              = .TRUE.
@@ -335,11 +393,9 @@ contains
         par%max_coupling_iters            =   20
         par%coupling_rtol                 = 1.0e-8_dp
         par%coupling_verbose              = .TRUE.
-        par%mdot_includes_friction        = .FALSE.
 
         ! Sliding-law parameters. C and c_till have no Julia default (they are
-        ! mandatory keywords there); 0 here makes an unconfigured law a no-op
-        ! rather than a silent wrong answer.
+        ! mandatory there); 0 here makes an unconfigured law a no-op.
         par%weertman_C                    = 0.0_dp
         par%weertman_q                    = 1.0_dp / 3.0_dp
         par%power_plastic_c_till          = 0.0_dp
@@ -348,14 +404,24 @@ contains
         par%reg_coulomb_c_till            = 0.0_dp
         par%reg_coulomb_q                 = 1.0_dp / 3.0_dp
         par%reg_coulomb_u0                = 100.0_dp / K24_SEC_PER_YEAR
+        par%shakti_C                      = 0.0_dp
+        par%shakti_n                      = 3.0_dp
+        par%shakti_lambda_coeff           = 1.5_dp
 
-        ! Bounded domain, the reference's convention. hydro_init sets these
-        ! for a periodic host grid.
         par%periodic_x                    = .FALSE.
         par%periodic_y                    = .FALSE.
 
         call nml_read(filename,group,"k24_substrate_type",                par%substrate_type,                init=init_pars,defaults_file=def_file,defaults_group=def_group)
         call nml_read(filename,group,"k24_flux_solver",                   par%flux_solver,                   init=init_pars,defaults_file=def_file,defaults_group=def_group)
+        call nml_read(filename,group,"k24_routing_scheme",                par%routing_scheme,                init=init_pars,defaults_file=def_file,defaults_group=def_group)
+        call nml_read(filename,group,"k24_quinn_original",                par%quinn_original,                init=init_pars,defaults_file=def_file,defaults_group=def_group)
+        call nml_read(filename,group,"k24_fill_algorithm",                par%fill_algorithm,                init=init_pars,defaults_file=def_file,defaults_group=def_group)
+        call nml_read(filename,group,"k24_priority_flood_epsilon",        par%priority_flood_epsilon,        init=init_pars,defaults_file=def_file,defaults_group=def_group)
+        call nml_read(filename,group,"k24_q_conversion",                  par%q_conversion,                  init=init_pars,defaults_file=def_file,defaults_group=def_group)
+        call nml_read(filename,group,"k24_dissipation_discretization",    par%dissipation_discretization,    init=init_pars,defaults_file=def_file,defaults_group=def_group)
+        call nml_read(filename,group,"k24_friction_discretization",       par%friction_discretization,       init=init_pars,defaults_file=def_file,defaults_group=def_group)
+        call nml_read(filename,group,"k24_friction_quadrature",           par%friction_quadrature,           init=init_pars,defaults_file=def_file,defaults_group=def_group)
+        call nml_read(filename,group,"k24_friction_u_floor",              par%friction_u_floor,              init=init_pars,defaults_file=def_file,defaults_group=def_group)
         call nml_read(filename,group,"k24_drainage_mode",                 par%drainage_mode,                 init=init_pars,defaults_file=def_file,defaults_group=def_group)
         call nml_read(filename,group,"k24_water_thickness_algorithm",     par%water_thickness_algorithm,     init=init_pars,defaults_file=def_file,defaults_group=def_group)
         call nml_read(filename,group,"k24_gradient_convention",           par%gradient_convention,           init=init_pars,defaults_file=def_file,defaults_group=def_group)
@@ -375,7 +441,7 @@ contains
         call nml_read(filename,group,"k24_critical_discharge",            par%critical_discharge,            init=init_pars,defaults_file=def_file,defaults_group=def_group)
         call nml_read(filename,group,"k24_initial_cavity_height",         par%initial_cavity_height,         init=init_pars,defaults_file=def_file,defaults_group=def_group)
         call nml_read(filename,group,"k24_coupling_length",               par%coupling_length,               init=init_pars,defaults_file=def_file,defaults_group=def_group)
-        call nml_read(filename,group,"k24_long_coupling_water",           par%long_coupling_water,           init=init_pars,defaults_file=def_file,defaults_group=def_group)
+        call nml_read(filename,group,"k24_coupling_length_kamb86",        par%coupling_length_kamb86,        init=init_pars,defaults_file=def_file,defaults_group=def_group)
         call nml_read(filename,group,"k24_min_pressure_fraction",         par%min_pressure_fraction,         init=init_pars,defaults_file=def_file,defaults_group=def_group)
         call nml_read(filename,group,"k24_eta_w",                         par%eta_w,                         init=init_pars,defaults_file=def_file,defaults_group=def_group)
         call nml_read(filename,group,"k24_W_min",                         par%W_min,                         init=init_pars,defaults_file=def_file,defaults_group=def_group)
@@ -391,7 +457,6 @@ contains
         call nml_read(filename,group,"k24_max_coupling_iters",            par%max_coupling_iters,            init=init_pars,defaults_file=def_file,defaults_group=def_group)
         call nml_read(filename,group,"k24_coupling_rtol",                 par%coupling_rtol,                 init=init_pars,defaults_file=def_file,defaults_group=def_group)
         call nml_read(filename,group,"k24_coupling_verbose",              par%coupling_verbose,              init=init_pars,defaults_file=def_file,defaults_group=def_group)
-        call nml_read(filename,group,"k24_mdot_includes_friction",        par%mdot_includes_friction,        init=init_pars,defaults_file=def_file,defaults_group=def_group)
         call nml_read(filename,group,"k24_weertman_C",                    par%weertman_C,                    init=init_pars,defaults_file=def_file,defaults_group=def_group)
         call nml_read(filename,group,"k24_weertman_q",                    par%weertman_q,                    init=init_pars,defaults_file=def_file,defaults_group=def_group)
         call nml_read(filename,group,"k24_power_plastic_c_till",          par%power_plastic_c_till,          init=init_pars,defaults_file=def_file,defaults_group=def_group)
@@ -400,9 +465,12 @@ contains
         call nml_read(filename,group,"k24_reg_coulomb_c_till",            par%reg_coulomb_c_till,            init=init_pars,defaults_file=def_file,defaults_group=def_group)
         call nml_read(filename,group,"k24_reg_coulomb_q",                 par%reg_coulomb_q,                 init=init_pars,defaults_file=def_file,defaults_group=def_group)
         call nml_read(filename,group,"k24_reg_coulomb_u0",                par%reg_coulomb_u0,                init=init_pars,defaults_file=def_file,defaults_group=def_group)
+        call nml_read(filename,group,"k24_shakti_C",                      par%shakti_C,                      init=init_pars,defaults_file=def_file,defaults_group=def_group)
+        call nml_read(filename,group,"k24_shakti_n",                      par%shakti_n,                      init=init_pars,defaults_file=def_file,defaults_group=def_group)
+        call nml_read(filename,group,"k24_shakti_lambda_coeff",           par%shakti_lambda_coeff,           init=init_pars,defaults_file=def_file,defaults_group=def_group)
 
         ! Derived. hydro_par_load overwrites water_density afterwards with the
-        ! top-level par%rho_w and calls k24_finalize_par to refresh K.
+        ! top-level par%rho_w and calls k24_finalize_par again.
         call k24_finalize_par(par)
 
         return
@@ -410,17 +478,80 @@ contains
     end subroutine k24_par_load
 
     subroutine k24_finalize_par(par)
-        ! Recompute every parameter derived from another one. Called at the end
-        ! of k24_par_load and again by hydro_par_load once it has stamped the
-        ! top-level rho_w / rho_ice / g into the sub-struct, so K always
-        ! reflects the densities actually in use.
+        ! Recompute every parameter derived from another one and check the
+        ! option combinations the KazmierczakHydroModel constructor checks.
         implicit none
         type(k24_param_class), intent(INOUT) :: par
+
+        logical :: gds
 
         ! Manning-Strickler / Darcy-Weisbach conductivity coefficient,
         ! K = (2/pi)^(1/4) * sqrt((pi+2)/(rho_w*f)).
         par%K = (2.0_dp / K24_PI)**0.25_dp * &
                 sqrt((K24_PI + 2.0_dp) / (par%water_density * par%friction_factor))
+
+        ! The smoothing kernel's 2D area-weighted effective coupling length is
+        ! 2*longcoupwater*h_avg, so longcoupwater = coupling_length_kamb86/2
+        ! makes the effective length coupling_length_kamb86*h_avg exactly.
+        if (par%coupling_length_kamb86 < 0.0_dp) then
+            write(*,*) "k24_finalize_par:: error: k24_coupling_length_kamb86 must be >= 0 (0 disables the smoothing)."
+            write(*,*) "k24_coupling_length_kamb86 = ", par%coupling_length_kamb86
+            stop
+        end if
+        par%long_coupling_water = par%coupling_length_kamb86 / 2.0_dp
+
+        if (par%routing_scheme < K24_ROUTE_WARNER .or. par%routing_scheme > K24_ROUTE_GDS_TARBOTON) then
+            write(*,*) "k24_finalize_par:: error: k24_routing_scheme must be one of [0,1,2,3,4,5]."
+            write(*,*) "routing_scheme = ", par%routing_scheme
+            stop
+        end if
+
+        gds = (par%routing_scheme == K24_ROUTE_GDS_WARNER .or. par%routing_scheme == K24_ROUTE_GDS_TARBOTON)
+
+        if (par%routing_scheme == K24_ROUTE_GDS_WARNER .or. par%routing_scheme == K24_ROUTE_WARNER) then
+            par%n_dirs = 4
+        else
+            par%n_dirs = 8
+        end if
+
+        ! Unset options follow the routing scheme (AbstractRoutingScheme):
+        ! Warner gets its face-based partners, the GDS schemes the original
+        ! K24 choices.
+        par%fill_alg = par%fill_algorithm
+        if (par%fill_alg == K24_FILL_AUTO) then
+            if (gds) then
+                par%fill_alg = K24_FILL_JACOBI
+            else
+                par%fill_alg = K24_FILL_PRIORITY_FLOOD
+            end if
+        end if
+        par%q_conv = par%q_conversion
+        if (par%q_conv == K24_QCONV_AUTO) then
+            if (par%routing_scheme == K24_ROUTE_WARNER) then
+                par%q_conv = K24_QCONV_FACE_AVERAGE
+            else
+                par%q_conv = K24_QCONV_OUTFLOW
+            end if
+        end if
+        par%diss_disc = par%dissipation_discretization
+        if (par%diss_disc == K24_DISS_AUTO) then
+            if (par%routing_scheme == K24_ROUTE_WARNER) then
+                par%diss_disc = K24_DISS_FACE
+            else
+                par%diss_disc = K24_DISS_CELL
+            end if
+        end if
+
+        if (par%routing_scheme /= K24_ROUTE_GDS_WARNER .and. par%flux_solver /= K24_FLUX_TAPED) then
+            write(*,*) "k24_finalize_par:: error: k24_routing_scheme = ", par%routing_scheme, &
+                       " requires k24_flux_solver = 3 (taped); the other flux solvers only implement GDS_WARNER (1)."
+            stop
+        end if
+        if ((par%q_conv == K24_QCONV_FACE_AVERAGE .or. par%diss_disc == K24_DISS_FACE) .and. par%n_dirs /= 4) then
+            write(*,*) "k24_finalize_par:: error: face-average q (k24_q_conversion = 1) and face dissipation"
+            write(*,*) "(k24_dissipation_discretization = 1) need a 4-neighbour routing scheme (0 WARNER or 1 GDS_WARNER)."
+            stop
+        end if
 
     end subroutine k24_finalize_par
 
@@ -468,32 +599,34 @@ contains
     end subroutine initialize_kappa
 
     ! ============================================================
-    ! Top-level K24 driver
+    ! Main entry point
     ! ============================================================
-    subroutine calc_k24(q_x, q_y, N, p_w, W, q, &
-                        H_ice, z_bed, mask, mdot, uxy_b, A_glen, kappa, &
-                        dx, dy, par, gsx_out, gsy_out, absgs_out, absg_out, phi0_out)
+    subroutine calc_k24(q_x, q_y, N, p_w, W, q, Q_b, Q_diss, &
+                        H_ice, z_bed, mask, G, q_T, i_eb, uxy_b, A_glen, kappa, &
+                        dx, dy, par, ux_b, uy_b, tau_b_in, c_till_in, diss_io, &
+                        gsx_out, gsy_out, absgs_out, absg_out, phi0_out)
         ! Mirrors update_steady_state! (FastHydrology.jl/.../run.jl):
-        ! update_q, then update_N, then update_W -- W last because its
-        ! ArealConduitThickness closure reads S_inf, which update_N is what
-        ! keeps current.
+        ! update_q, then update_N, then update_W.
         !
-        ! `q` and `N` are INOUT, not OUT: FastHydrology.jl's model.q and
-        ! state.N persist between solves, and both Picard loops below warm-start
-        ! from them. Pass the caller's own persistent fields (hyd%now%q,
-        ! hyd%now%N), zero-initialised on the first call.
+        ! `q` and `N` are INOUT: FastHydrology.jl's model.q and state.N persist
+        ! between solves, and both Picard loops warm-start from them. Pass the
+        ! caller's own persistent fields, zero-initialised on the first call.
+        ! `diss_io` (optional, [kg/m2/s]) plays the same role for the
+        ! face-assembled dissipation (deviation 5).
         !
-        ! The source `mdot` is the water source rate fed into the transport
-        ! solver [m/s, water-equivalent]. In sequential bucket->K24 coupling
-        ! this is the bucket overflow (till-saturation spill); in TIL_NONE mode
-        ! it can be the raw basal-melt water equivalent.
+        ! Water source terms (see the module header): G, q_T [W/m2] and i_eb
+        ! [kg/m2/s]. Q_b and Q_diss [W/m2] are returned as used in the last
+        ! Picard sweep.
         !
-        ! The trailing optional arguments expose internals that are otherwise
-        ! scoped to this call. They exist so tests/k24_synth.f90 can compare
-        ! the intermediate fields against FastHydrology.jl stage by stage
-        ! rather than only the end result -- which is how the drainage-mode
-        ! opening-coefficient bug was found. Ordinary callers omit them and
-        ! pay nothing.
+        ! Optional inputs needed by some options only:
+        !   ux_b, uy_b : C-grid basal velocities [m/s] (acx: face between i and
+        !                i+1; acy: face between j and j+1) -- STAGGERED friction
+        !   tau_b_in   : basal shear stress magnitude [Pa] -- PRESCRIBED_FIELD
+        !   c_till_in  : per-cell Coulomb coefficient -- REG_COULOMB_FIELD
+        !
+        ! The trailing optional outputs expose internals so tests/k24_synth.f90
+        ! can compare the intermediate fields against FastHydrology.jl stage by
+        ! stage. Ordinary callers omit them.
 
         implicit none
 
@@ -502,85 +635,107 @@ contains
         real(dp), intent(OUT)   :: p_w(:,:)             ! water pressure (Po - N) [Pa]
         real(dp), intent(OUT)   :: W(:,:)               ! water layer thickness [m]
         real(dp), intent(INOUT) :: q(:,:)               ! distributed flux magnitude [m2/s]
+        real(dp), intent(OUT)   :: Q_b(:,:)             ! frictional heat [W/m2]
+        real(dp), intent(OUT)   :: Q_diss(:,:)          ! dissipation heat [W/m2]
         real(dp), intent(IN)    :: H_ice(:,:)           ! [m]
         real(dp), intent(IN)    :: z_bed(:,:)           ! [m]
         real(dp), intent(IN)    :: mask(:,:)            ! 1 on grounded ice, else 0
-        real(dp), intent(IN)    :: mdot(:,:)            ! source rate [m/s, water-equiv.]
+        real(dp), intent(IN)    :: G(:,:)               ! geothermal heat flux into the bed [W/m2]
+        real(dp), intent(IN)    :: q_T(:,:)             ! conductive heat flux from the bed into the ice [W/m2]
+        real(dp), intent(IN)    :: i_eb(:,:)            ! water reaching the bed from above [kg/m2/s]
         real(dp), intent(IN)    :: uxy_b(:,:)           ! basal sliding speed magnitude [m/s]
         real(dp), intent(IN)    :: A_glen(:,:)          ! Glen's A [Pa^-n s^-1]
         real(dp), intent(IN)    :: kappa(:,:)           ! bed type indicator (0 hard, 1 soft)
         real(dp), intent(IN)    :: dx, dy               ! [m] grid spacing
         type(k24_param_class), intent(IN) :: par
-        ! Optional diagnostics (see above): the smoothed gradient components
-        ! and magnitude, the unsmoothed magnitude, and the filled potential.
-        real(dp), intent(OUT), optional :: gsx_out(:,:), gsy_out(:,:), absgs_out(:,:)
-        real(dp), intent(OUT), optional :: absg_out(:,:), phi0_out(:,:)
+        real(dp), intent(IN),    optional :: ux_b(:,:), uy_b(:,:), tau_b_in(:,:), c_till_in(:,:)
+        real(dp), intent(INOUT), optional :: diss_io(:,:)
+        real(dp), intent(OUT),   optional :: gsx_out(:,:), gsy_out(:,:), absgs_out(:,:)
+        real(dp), intent(OUT),   optional :: absg_out(:,:), phi0_out(:,:)
 
         type(k24_work_class) :: wk
         integer  :: nx, ny, i, j
-        real(dp) :: gmag
+        real(dp) :: gmag, epsT
 
         nx = size(H_ice,1)
         ny = size(H_ice,2)
 
+        if (par%friction_discretization == K24_FRICTION_STAGGERED) then
+            if (.not. (present(ux_b) .and. present(uy_b))) then
+                write(*,*) "calc_k24:: error: k24_friction_discretization = 1 (staggered) needs ux_b and uy_b."
+                stop
+            end if
+        end if
+        if (par%sliding_law == K24_SLIDING_PRESCRIBED_FIELD .and. .not. present(tau_b_in)) then
+            write(*,*) "calc_k24:: error: k24_sliding_law = 4 (prescribed field) needs tau_b_in."
+            stop
+        end if
+        if (par%sliding_law == K24_SLIDING_REG_COULOMB_FIELD .and. .not. present(c_till_in)) then
+            write(*,*) "calc_k24:: error: k24_sliding_law = 5 (regularized Coulomb field) needs c_till_in."
+            stop
+        end if
+
         call k24_work_alloc(wk, nx, ny)
 
-        ! ================= update_q! =================
-
-        ! Geometric potential from the RAW ice thickness.
-        call update_phi0(wk%phi0, H_ice, z_bed, par)
-
-        ! Fill local minima so water does not get stuck.
-        call potential_filling(wk%phi0, wk%phi0_tmp, par%fill_iters, par%periodic_x, par%periodic_y)
-
-        ! Ice thickness consistent with the filled potential. Stored separately
-        ! so it does not leak into the effective-pressure calculation, which
-        ! keeps using the raw H_ice (see update_Po below).
+        ! Fixed part of the melt rate, (G - q_T)/L_w [kg/m2/s].
         !$omp parallel do default(shared) private(i,j) schedule(static)
         do j = 1, ny
             do i = 1, nx
-                wk%h(i,j) = (wk%phi0(i,j) - par%water_density * par%gravity * z_bed(i,j)) &
-                          / (par%ice_density * par%gravity)
+                wk%mdot_fixed(i,j) = (G(i,j) - q_T(i,j)) / par%latent_heat_water
             end do
         end do
         !$omp end parallel do
 
-        call update_potential_gradients(wk, dx, dy, par%periodic_x, par%periodic_y)
-        call update_smoothed_potential_gradients(wk, dx, dy, mask, par)
+        if (par%sliding_law == K24_SLIDING_SHAKTI_REG_COULOMB) then
+            wk%lambda = par%shakti_lambda_coeff * A_glen
+        end if
 
-        ! Correction factor from psi_out to q. Depends only on the (already
-        ! updated) smoothed gradients, so it is fixed for the whole Picard
-        ! loop below. Anisotropy-aware: the per-cell outflow width is
-        ! |gsx|*dy + |gsy|*dx, exact for dx /= dy (this replaces the earlier
-        ! sqrt(dx*dy) placeholder, which was only correct for square cells).
+        if (present(diss_io)) wk%diss = diss_io
+
+        ! ================= update_q! =================
+
+        ! True geometric potential from the RAW ice thickness.
+        call update_phi0(wk%phi0, H_ice, z_bed, par)
+
+        ! Routing potential and flow directions (prepare_routing!, routing.jl).
+        call prepare_routing(wk, H_ice, z_bed, mask, dx, dy, par)
+
+        ! Correction factor from psi_out to q. Depends only on the routing
+        ! directions, so it is fixed for the whole Picard loop below.
+        epsT = epsilon(1.0_dp)
         !$omp parallel do default(shared) private(i,j) schedule(static)
         do j = 1, ny
             do i = 1, nx
                 wk%corfac(i,j) = (abs(wk%gsx(i,j)) * dy + abs(wk%gsy(i,j)) * dx) &
-                    / (sqrt(wk%gsx(i,j)*wk%gsx(i,j) + wk%gsy(i,j)*wk%gsy(i,j)) + 1.0e-15_dp)
+                    / (sqrt(wk%gsx(i,j)*wk%gsx(i,j) + wk%gsy(i,j)*wk%gsy(i,j)) + epsT)
             end do
         end do
         !$omp end parallel do
 
-        call resolve_q(q, N, wk, mask, mdot, uxy_b, A_glen, kappa, H_ice, dx, dy, par)
+        ! The routing graph just changed: any recorded tape is stale.
+        wk%tape_valid = .FALSE.
+
+        call resolve_q(q, N, wk, mask, i_eb, uxy_b, A_glen, kappa, H_ice, dx, dy, par, &
+                       ux_b, uy_b, tau_b_in, c_till_in)
 
         ! ================= update_N! =================
-        call update_N(N, q, wk, uxy_b, A_glen, kappa, H_ice, par)
+        call update_N(N, q, wk, mask, uxy_b, A_glen, kappa, H_ice, par)
 
         ! ================= update_W! =================
         call update_W(W, q, wk, mask, par)
 
-        ! ================= diagnostics =================
+        ! ================= outputs / diagnostics =================
+        Q_b    = wk%Q_b
+        Q_diss = wk%Q_diss
+        if (present(diss_io)) diss_io = wk%diss
+
         ! q_x / q_y have no counterpart in FastHydrology.jl, which carries only
-        ! the scalar q. They are a Fortran-side diagnostic: the magnitude q
-        ! resolved along the UNSMOOTHED potential gradient, unchanged from the
-        ! previous implementation. (The routing itself uses the smoothed
-        ! gradient; if you need the components to point along the routing
-        ! direction, use gsx/gsy here instead.)
+        ! the scalar q. They are a Fortran-side diagnostic: q resolved along
+        ! the (unsmoothed) gradient of the routing potential.
         !$omp parallel do default(shared) private(i,j,gmag) schedule(static)
         do j = 1, ny
             do i = 1, nx
-                gmag = wk%abs_g(i,j)
+                gmag = sqrt(wk%gx(i,j)*wk%gx(i,j) + wk%gy(i,j)*wk%gy(i,j))
                 if (gmag > 1.0e-12_dp) then
                     q_x(i,j) = q(i,j) * wk%gx(i,j) / gmag
                     q_y(i,j) = q(i,j) * wk%gy(i,j) / gmag
@@ -618,18 +773,29 @@ contains
         wk%nx = nx
         wk%ny = ny
 
-        allocate(wk%phi0(nx,ny), wk%phi0_tmp(nx,ny), wk%h(nx,ny))
+        allocate(wk%phi0(nx,ny), wk%phi0_filled(nx,ny), wk%phi0_tmp(nx,ny), wk%h(nx,ny))
         allocate(wk%gx(nx,ny),  wk%gy(nx,ny),  wk%abs_g(nx,ny))
         allocate(wk%gsx(nx,ny), wk%gsy(nx,ny), wk%abs_gs(nx,ny))
-        allocate(wk%mdot_total(nx,ny), wk%psi_out(nx,ny), wk%corfac(nx,ny))
-        allocate(wk%q_prev(nx,ny), wk%N_prev(nx,ny), wk%tau_b(nx,ny))
+        allocate(wk%mdot_fixed(nx,ny), wk%mdot_total(nx,ny), wk%psi_out(nx,ny), wk%corfac(nx,ny))
+        allocate(wk%q_prev(nx,ny), wk%N_prev(nx,ny), wk%tau_b(nx,ny), wk%lambda(nx,ny))
+        allocate(wk%Q_b(nx,ny), wk%Q_diss(nx,ny))
         allocate(wk%visited(nx,ny))
+        allocate(wk%w8(8,nx,ny), wk%Fx(nx+1,ny), wk%Fy(nx,ny+1), wk%diss(nx,ny))
         allocate(wk%Q(nx,ny), wk%S_inf(nx,ny))
         allocate(wk%H_hard(nx,ny), wk%H_soft(nx,ny), wk%H_cond(nx,ny))
         allocate(wk%N_inf(nx,ny), wk%Po(nx,ny))
 
         wk%psi_out = 0.0_dp
         wk%tau_b   = 0.0_dp
+        wk%lambda  = 0.0_dp
+        wk%Q_b     = 0.0_dp
+        wk%Q_diss  = 0.0_dp
+        wk%w8      = 0.0_dp
+        wk%Fx      = 0.0_dp
+        wk%Fy      = 0.0_dp
+        wk%diss    = 0.0_dp
+        wk%tape_valid = .FALSE.
+        wk%tape_n     = 0
 
     end subroutine k24_work_alloc
 
@@ -637,36 +803,52 @@ contains
         implicit none
         type(k24_work_class), intent(INOUT) :: wk
 
-        if (allocated(wk%phi0))       deallocate(wk%phi0)
-        if (allocated(wk%phi0_tmp))   deallocate(wk%phi0_tmp)
-        if (allocated(wk%h))          deallocate(wk%h)
-        if (allocated(wk%gx))         deallocate(wk%gx)
-        if (allocated(wk%gy))         deallocate(wk%gy)
-        if (allocated(wk%abs_g))      deallocate(wk%abs_g)
-        if (allocated(wk%gsx))        deallocate(wk%gsx)
-        if (allocated(wk%gsy))        deallocate(wk%gsy)
-        if (allocated(wk%abs_gs))     deallocate(wk%abs_gs)
-        if (allocated(wk%mdot_total)) deallocate(wk%mdot_total)
-        if (allocated(wk%psi_out))    deallocate(wk%psi_out)
-        if (allocated(wk%corfac))     deallocate(wk%corfac)
-        if (allocated(wk%q_prev))     deallocate(wk%q_prev)
-        if (allocated(wk%N_prev))     deallocate(wk%N_prev)
-        if (allocated(wk%tau_b))      deallocate(wk%tau_b)
-        if (allocated(wk%visited))    deallocate(wk%visited)
-        if (allocated(wk%Q))          deallocate(wk%Q)
-        if (allocated(wk%S_inf))      deallocate(wk%S_inf)
-        if (allocated(wk%H_hard))     deallocate(wk%H_hard)
-        if (allocated(wk%H_soft))     deallocate(wk%H_soft)
-        if (allocated(wk%H_cond))     deallocate(wk%H_cond)
-        if (allocated(wk%N_inf))      deallocate(wk%N_inf)
-        if (allocated(wk%Po))         deallocate(wk%Po)
-        if (allocated(wk%in_degree))  deallocate(wk%in_degree)
-        if (allocated(wk%stack_i))    deallocate(wk%stack_i)
-        if (allocated(wk%stack_j))    deallocate(wk%stack_j)
-        if (allocated(wk%stack_k))    deallocate(wk%stack_k)
+        if (allocated(wk%phi0))        deallocate(wk%phi0)
+        if (allocated(wk%phi0_filled)) deallocate(wk%phi0_filled)
+        if (allocated(wk%phi0_tmp))    deallocate(wk%phi0_tmp)
+        if (allocated(wk%h))           deallocate(wk%h)
+        if (allocated(wk%gx))          deallocate(wk%gx)
+        if (allocated(wk%gy))          deallocate(wk%gy)
+        if (allocated(wk%abs_g))       deallocate(wk%abs_g)
+        if (allocated(wk%gsx))         deallocate(wk%gsx)
+        if (allocated(wk%gsy))         deallocate(wk%gsy)
+        if (allocated(wk%abs_gs))      deallocate(wk%abs_gs)
+        if (allocated(wk%mdot_fixed))  deallocate(wk%mdot_fixed)
+        if (allocated(wk%mdot_total))  deallocate(wk%mdot_total)
+        if (allocated(wk%psi_out))     deallocate(wk%psi_out)
+        if (allocated(wk%corfac))      deallocate(wk%corfac)
+        if (allocated(wk%q_prev))      deallocate(wk%q_prev)
+        if (allocated(wk%N_prev))      deallocate(wk%N_prev)
+        if (allocated(wk%tau_b))       deallocate(wk%tau_b)
+        if (allocated(wk%lambda))      deallocate(wk%lambda)
+        if (allocated(wk%Q_b))         deallocate(wk%Q_b)
+        if (allocated(wk%Q_diss))      deallocate(wk%Q_diss)
+        if (allocated(wk%visited))     deallocate(wk%visited)
+        if (allocated(wk%w8))          deallocate(wk%w8)
+        if (allocated(wk%Fx))          deallocate(wk%Fx)
+        if (allocated(wk%Fy))          deallocate(wk%Fy)
+        if (allocated(wk%diss))        deallocate(wk%diss)
+        if (allocated(wk%t_dst_i))     deallocate(wk%t_dst_i)
+        if (allocated(wk%t_dst_j))     deallocate(wk%t_dst_j)
+        if (allocated(wk%t_src_i))     deallocate(wk%t_src_i)
+        if (allocated(wk%t_src_j))     deallocate(wk%t_src_j)
+        if (allocated(wk%t_w))         deallocate(wk%t_w)
+        if (allocated(wk%Q))           deallocate(wk%Q)
+        if (allocated(wk%S_inf))       deallocate(wk%S_inf)
+        if (allocated(wk%H_hard))      deallocate(wk%H_hard)
+        if (allocated(wk%H_soft))      deallocate(wk%H_soft)
+        if (allocated(wk%H_cond))      deallocate(wk%H_cond)
+        if (allocated(wk%N_inf))       deallocate(wk%N_inf)
+        if (allocated(wk%Po))          deallocate(wk%Po)
+        if (allocated(wk%in_degree))   deallocate(wk%in_degree)
+        if (allocated(wk%stack_i))     deallocate(wk%stack_i)
+        if (allocated(wk%stack_j))     deallocate(wk%stack_j)
+        if (allocated(wk%stack_k))     deallocate(wk%stack_k)
 
         wk%nx = 0
         wk%ny = 0
+        wk%tape_valid = .FALSE.
+        wk%tape_n     = 0
 
     end subroutine k24_work_free
 
@@ -693,8 +875,8 @@ contains
         end do
         !$omp end parallel do
 
-        ! DEVIATION: Julia divides by cnt unconditionally and returns NaN for
-        ! an empty mask. Returning 0 keeps a fully-floating domain finite.
+        ! DEVIATION: Julia returns NaN for an empty mask. 0 keeps a
+        ! fully-floating domain finite.
         if (cnt > 0) then
             m = s / real(cnt, dp)
         else
@@ -758,20 +940,123 @@ contains
     end subroutine update_phi0
 
     ! ============================================================
-    ! Iterative hollow-filling for spurious sinks
+    ! Routing potential and directions (prepare_routing!, routing.jl)
     ! ============================================================
-    subroutine potential_filling(phi0, phi0_tmp, iterations, periodic_x, periodic_y)
-        ! Mirrors potential_filling! (water_flux.jl). Every cell is visited,
-        ! including the domain edges, whose out-of-range neighbours are
-        ! edge-replicated (index clamped) -- the same convention
-        ! minus_gradient_x!/minus_gradient_y! use. The previous Fortran
-        ! implementation skipped the border ring entirely. In a periodic
-        ! direction the neighbours wrap instead (Fortran-only).
+    subroutine prepare_routing(wk, H_ice, z_bed, mask, dx, dy, par)
+        ! GDS schemes (GDS_WARNER, GDS_TARBOTON): fill phi0, take its
+        ! gradient, smooth the gradient components with the Kamb & Echelmeyer
+        ! (1986) kernel. Potential schemes (WARNER, QUINN, TARBOTON,
+        ! MODIFIED_TARBOTON): smooth the potential itself with the same
+        ! kernel, then fill it; gsx/gsy then hold the unsmoothed gradient of
+        ! that surface. abs_g (N, dissipation) is always the gradient of the
+        ! TRUE potential.
+        implicit none
+        type(k24_work_class), intent(INOUT) :: wk
+        real(dp),             intent(IN)    :: H_ice(:,:), z_bed(:,:), mask(:,:), dx, dy
+        type(k24_param_class),intent(IN)    :: par
+
+        real(dp), allocatable :: kernel(:,:)
+        integer :: i, j, frb_x, frb_y
+
+        select case (par%routing_scheme)
+
+            case (K24_ROUTE_GDS_WARNER, K24_ROUTE_GDS_TARBOTON)
+
+                wk%phi0_filled = wk%phi0
+                call potential_filling(wk, z_bed, mask, par)
+                call update_potential_gradients(wk, dx, dy, par%periodic_x, par%periodic_y)
+                call update_smoothed_potential_gradients(wk, dx, dy, mask, par)
+                if (par%routing_scheme /= K24_ROUTE_GDS_WARNER .or. needs_face_fluxes(par)) then
+                    call compute_routing_weights(wk, mask, dx, dy, par)
+                end if
+
+            case default
+
+                if (par%long_coupling_water == 0.0_dp) then
+                    wk%phi0_filled = wk%phi0
+                else
+                    call coupling_kernel(kernel, frb_x, frb_y, max(masked_mean(H_ice, mask), 10.0_dp), dx, dy, par)
+                    call imfilter_replicate_fftw(wk%phi0, wk%nx, wk%ny, kernel, frb_x, frb_y, wk%phi0_filled, &
+                                                 par%periodic_x, par%periodic_y)
+                    deallocate(kernel)
+                end if
+                call potential_filling(wk, z_bed, mask, par)
+                call update_potential_gradients(wk, dx, dy, par%periodic_x, par%periodic_y)
+                wk%gsx = wk%gx
+                wk%gsy = wk%gy
+                !$omp parallel do default(shared) private(i,j) schedule(static)
+                do j = 1, wk%ny
+                    do i = 1, wk%nx
+                        wk%abs_gs(i,j) = abs(wk%gsx(i,j)) + abs(wk%gsy(i,j))
+                    end do
+                end do
+                !$omp end parallel do
+                call compute_routing_weights(wk, mask, dx, dy, par)
+
+        end select
+
+    end subroutine prepare_routing
+
+    logical function needs_face_fluxes(par)
+        ! Face fluxes are needed each sweep for face-average q, or for
+        ! face-assembled dissipation with the dissipation melt on.
+        implicit none
+        type(k24_param_class), intent(IN) :: par
+        needs_face_fluxes = (par%q_conv == K24_QCONV_FACE_AVERAGE) .or. &
+                            (par%dissipation_melt .and. par%diss_disc == K24_DISS_FACE)
+    end function needs_face_fluxes
+
+    ! ============================================================
+    ! Pit filling of the routing potential (potential_filling!)
+    ! ============================================================
+    subroutine potential_filling(wk, z_bed, mask, par)
+        ! Removes local minima of wk%phi0_filled (which holds the surface to
+        ! fill on entry) per par%fill_alg, then sets wk%h to the ice thickness
+        ! consistent with the filled potential (only used for the mean
+        ! thickness in the GDS smoothing kernel). wk%phi0 is untouched.
+        implicit none
+        type(k24_work_class), intent(INOUT) :: wk
+        real(dp),             intent(IN)    :: z_bed(:,:), mask(:,:)
+        type(k24_param_class),intent(IN)    :: par
+        integer :: i, j
+
+        select case (par%fill_alg)
+            case (K24_FILL_JACOBI)
+                call fill_jacobi(wk%phi0_filled, wk%phi0_tmp, par%fill_iters, .FALSE., par%periodic_x, par%periodic_y)
+            case (K24_FILL_LOWEST_NEIGHBOUR)
+                call fill_jacobi(wk%phi0_filled, wk%phi0_tmp, par%fill_iters, .TRUE., par%periodic_x, par%periodic_y)
+            case (K24_FILL_PRIORITY_FLOOD)
+                call fill_priority_flood(wk, mask, par)
+            case default
+                write(*,*) "potential_filling:: error: k24_fill_algorithm must be one of [-1,0,1,2]."
+                write(*,*) "fill_algorithm = ", par%fill_algorithm
+                stop
+        end select
+
+        !$omp parallel do default(shared) private(i,j) schedule(static)
+        do j = 1, wk%ny
+            do i = 1, wk%nx
+                wk%h(i,j) = (wk%phi0_filled(i,j) - par%water_density * par%gravity * z_bed(i,j)) &
+                          / (par%ice_density * par%gravity)
+            end do
+        end do
+        !$omp end parallel do
+
+    end subroutine potential_filling
+
+    subroutine fill_jacobi(phi0, phi0_tmp, iterations, lowest, periodic_x, periodic_y)
+        ! JacobiFill / LowestNeighbourFill: `iterations` passes of raising every
+        ! strict local minimum to the mean of its 4 neighbours (or, `lowest`,
+        ! to its lowest neighbour). Out-of-range neighbours are edge-replicated
+        ! (index clamped), so an edge cell is never a strict minimum; in a
+        ! periodic direction they wrap instead (Fortran-only). Julia only
+        ! re-checks the cells next to the last pass's fills, which gives the
+        ! same result as this full scan.
         implicit none
         real(dp), intent(INOUT) :: phi0(:,:)
         real(dp), intent(INOUT) :: phi0_tmp(:,:)
         integer,  intent(IN)    :: iterations
-        logical,  intent(IN)    :: periodic_x, periodic_y
+        logical,  intent(IN)    :: lowest, periodic_x, periodic_y
 
         integer  :: iter, i, j, nx, ny, im1, ip1, jm1, jp1
         real(dp) :: p, p1, p2, p3, p4
@@ -790,7 +1075,11 @@ contains
                     p1  = phi0(ip1,j);  p2 = phi0(im1,j)
                     p3  = phi0(i,jp1);  p4 = phi0(i,jm1)
                     if (p < p1 .and. p < p2 .and. p < p3 .and. p < p4) then
-                        phi0_tmp(i,j) = (p1 + p2 + p3 + p4) / 4.0_dp
+                        if (lowest) then
+                            phi0_tmp(i,j) = min(p1, p2, p3, p4)
+                        else
+                            phi0_tmp(i,j) = (p1 + p2 + p3 + p4) / 4.0_dp
+                        end if
                     end if
                 end do
             end do
@@ -798,113 +1087,243 @@ contains
             phi0 = phi0_tmp
         end do
 
-    end subroutine potential_filling
+    end subroutine fill_jacobi
+
+    subroutine fill_priority_flood(wk, mask, par)
+        ! PriorityFloodFill: Priority-Flood+epsilon (Barnes, Lehman & Mulla
+        ! 2014) restricted to grounded cells. Outlets (seeds): every
+        ! non-grounded cell next to a grounded one and every grounded cell on
+        ! a (non-periodic) domain edge. Cells are visited in increasing order
+        ! of filled potential; each newly reached grounded neighbour not
+        ! higher than the cell it was reached from is raised to that value
+        ! plus epsilon. The heap is the same binary min-heap as Julia's
+        ! heap_push!/heap_pop!, so ties pop in the same order.
+        implicit none
+        type(k24_work_class), intent(INOUT) :: wk
+        real(dp),             intent(IN)    :: mask(:,:)
+        type(k24_param_class),intent(IN)    :: par
+
+        integer  :: nx, ny, i, j, ni, nj, d, k, n
+        integer, allocatable  :: heap_k(:)
+        real(dp), allocatable :: heap_p(:)
+        real(dp) :: pc, eps_pf
+        logical  :: seed
+
+        nx = wk%nx; ny = wk%ny
+        eps_pf = par%priority_flood_epsilon
+
+        allocate(heap_k(nx*ny), heap_p(nx*ny))
+        allocate(wk%in_degree(nx,ny))   ! reused as the "already queued" flag
+        wk%in_degree = 0
+        n = 0
+
+        do j = 1, ny
+            do i = 1, nx
+                if (mask(i,j) == 1.0_dp) then
+                    seed = ((.not. par%periodic_x) .and. (i == 1 .or. i == nx)) .or. &
+                           ((.not. par%periodic_y) .and. (j == 1 .or. j == ny))
+                else
+                    seed = .FALSE.
+                    do d = 1, 4
+                        ni = wrap_index(i + K24_DIRS(1,d), nx, par%periodic_x)
+                        nj = wrap_index(j + K24_DIRS(2,d), ny, par%periodic_y)
+                        if (ni < 1 .or. ni > nx .or. nj < 1 .or. nj > ny) cycle
+                        if (mask(ni,nj) == 1.0_dp) then
+                            seed = .TRUE.
+                            exit
+                        end if
+                    end do
+                end if
+                if (seed) then
+                    wk%in_degree(i,j) = 1
+                    call heap_push(heap_p, heap_k, n, wk%phi0_filled(i,j), i + (j-1)*nx)
+                end if
+            end do
+        end do
+
+        do while (n > 0)
+            call heap_pop(heap_p, heap_k, n, pc, k)
+            i = modulo(k-1, nx) + 1
+            j = (k-1) / nx + 1
+            do d = 1, 4
+                ni = wrap_index(i + K24_DIRS(1,d), nx, par%periodic_x)
+                nj = wrap_index(j + K24_DIRS(2,d), ny, par%periodic_y)
+                if (ni < 1 .or. ni > nx .or. nj < 1 .or. nj > ny) cycle
+                if (wk%in_degree(ni,nj) /= 0 .or. mask(ni,nj) /= 1.0_dp) cycle
+                wk%in_degree(ni,nj) = 1
+                if (wk%phi0_filled(ni,nj) <= pc) wk%phi0_filled(ni,nj) = pc + eps_pf
+                call heap_push(heap_p, heap_k, n, wk%phi0_filled(ni,nj), ni + (nj-1)*nx)
+            end do
+        end do
+
+        deallocate(heap_k, heap_p, wk%in_degree)
+
+    end subroutine fill_priority_flood
+
+    subroutine heap_push(p, k, n, pv, kv)
+        ! heap_push! (water_flux.jl): append, then sift up.
+        implicit none
+        real(dp), intent(INOUT) :: p(:)
+        integer,  intent(INOUT) :: k(:), n
+        real(dp), intent(IN)    :: pv
+        integer,  intent(IN)    :: kv
+        integer  :: c, par_i, ktmp
+        real(dp) :: ptmp
+
+        n = n + 1
+        p(n) = pv; k(n) = kv
+        c = n
+        do while (c > 1)
+            par_i = c / 2
+            if (p(par_i) <= p(c)) exit
+            ptmp = p(par_i); p(par_i) = p(c); p(c) = ptmp
+            ktmp = k(par_i); k(par_i) = k(c); k(c) = ktmp
+            c = par_i
+        end do
+    end subroutine heap_push
+
+    subroutine heap_pop(p, k, n, top_p, top_k)
+        ! heap_pop! (water_flux.jl): take the root, move the last element to
+        ! the root and sift down.
+        implicit none
+        real(dp), intent(INOUT) :: p(:)
+        integer,  intent(INOUT) :: k(:), n
+        real(dp), intent(OUT)   :: top_p
+        integer,  intent(OUT)   :: top_k
+        integer  :: c, l, r, m, last_k
+        real(dp) :: last_p
+
+        top_p = p(1); top_k = k(1)
+        last_p = p(n); last_k = k(n)
+        n = n - 1
+        if (n > 0) then
+            c = 1
+            do
+                l = 2*c; r = l + 1
+                if (l > n) exit
+                if (r <= n) then
+                    if (p(r) < p(l)) then
+                        m = r
+                    else
+                        m = l
+                    end if
+                else
+                    m = l
+                end if
+                if (.not. (p(m) < last_p)) exit
+                p(c) = p(m); k(c) = k(m)
+                c = m
+            end do
+            p(c) = last_p; k(c) = last_k
+        end if
+    end subroutine heap_pop
 
     ! ============================================================
-    ! Potential gradients (unsmoothed)
+    ! Potential gradients
     ! ============================================================
+    subroutine minus_gradients(f, gx, gy, dx, dy, periodic_x, periodic_y)
+        ! minus_gradient_x_kernel!/minus_gradient_y_kernel! (grid.jl): centred
+        ! differences in the interior, one-sided (full-gradient) differences
+        ! at the domain edges, 0 on a single-cell axis. In a periodic
+        ! direction the centred difference wraps instead (Fortran-only).
+        implicit none
+        real(dp), intent(IN)  :: f(:,:)
+        real(dp), intent(OUT) :: gx(:,:), gy(:,:)
+        real(dp), intent(IN)  :: dx, dy
+        logical,  intent(IN)  :: periodic_x, periodic_y
+        integer :: i, j, nx, ny
+
+        nx = size(f,1); ny = size(f,2)
+
+        !$omp parallel do default(shared) private(i,j) schedule(static)
+        do j = 1, ny
+            do i = 1, nx
+                if (nx == 1) then
+                    gx(i,j) = 0.0_dp
+                else if (periodic_x) then
+                    gx(i,j) = -(f(wrap_index(i+1,nx,.TRUE.),j) - f(wrap_index(i-1,nx,.TRUE.),j)) / (2.0_dp*dx)
+                else if (i == 1) then
+                    gx(i,j) = -(f(2,j) - f(1,j)) / dx
+                else if (i == nx) then
+                    gx(i,j) = -(f(nx,j) - f(nx-1,j)) / dx
+                else
+                    gx(i,j) = -(f(i+1,j) - f(i-1,j)) / (2.0_dp*dx)
+                end if
+
+                if (ny == 1) then
+                    gy(i,j) = 0.0_dp
+                else if (periodic_y) then
+                    gy(i,j) = -(f(i,wrap_index(j+1,ny,.TRUE.)) - f(i,wrap_index(j-1,ny,.TRUE.))) / (2.0_dp*dy)
+                else if (j == 1) then
+                    gy(i,j) = -(f(i,2) - f(i,1)) / dy
+                else if (j == ny) then
+                    gy(i,j) = -(f(i,ny) - f(i,ny-1)) / dy
+                else
+                    gy(i,j) = -(f(i,j+1) - f(i,j-1)) / (2.0_dp*dy)
+                end if
+            end do
+        end do
+        !$omp end parallel do
+
+    end subroutine minus_gradients
+
     subroutine update_potential_gradients(wk, dx, dy, periodic_x, periodic_y)
-        ! Central difference with the neighbour INDEX clamped at the domain
-        ! edge (minus_gradient_x!/minus_gradient_y! in grid.jl), i.e. an edge
-        ! cell differences itself against its single interior neighbour over
-        ! the full 2*dx. The previous Fortran implementation instead copied the
-        ! adjacent interior cell's gradient into the border ring, which is a
-        ! different value. In a periodic direction the neighbour index wraps
-        ! instead (Fortran-only).
+        ! update_potential_gradients! (water_flux.jl): abs_g is the magnitude
+        ! of the gradient of the TRUE potential (S_inf, N_inf, dissipation);
+        ! gx/gy are then the components of the FILLED potential's gradient,
+        ! which only feed the routing.
         implicit none
         type(k24_work_class), intent(INOUT) :: wk
         real(dp),             intent(IN)    :: dx, dy
         logical,              intent(IN)    :: periodic_x, periodic_y
+        integer :: i, j
 
-        integer :: i, j, nx, ny, im1, ip1, jm1, jp1
+        call minus_gradients(wk%phi0, wk%gx, wk%gy, dx, dy, periodic_x, periodic_y)
 
-        nx = wk%nx; ny = wk%ny
-
-        !$omp parallel do default(shared) private(i,j,im1,ip1) schedule(static)
-        do j = 1, ny
-            do i = 1, nx
-                im1 = max(wrap_index(i-1, nx, periodic_x), 1);  ip1 = min(wrap_index(i+1, nx, periodic_x), nx)
-                wk%gx(i,j) = -(wk%phi0(ip1,j) - wk%phi0(im1,j)) / (2.0_dp * dx)
-            end do
-        end do
-        !$omp end parallel do
-
-        !$omp parallel do default(shared) private(i,j,jm1,jp1) schedule(static)
-        do j = 1, ny
-            jm1 = max(wrap_index(j-1, ny, periodic_y), 1);  jp1 = min(wrap_index(j+1, ny, periodic_y), ny)
-            do i = 1, nx
-                wk%gy(i,j) = -(wk%phi0(i,jp1) - wk%phi0(i,jm1)) / (2.0_dp * dy)
-            end do
-        end do
-        !$omp end parallel do
-
-        ! Euclidean magnitude for the unsmoothed field (the smoothed one below
-        ! uses the L1 sum instead -- that asymmetry is Julia's, not a typo).
         !$omp parallel do default(shared) private(i,j) schedule(static)
-        do j = 1, ny
-            do i = 1, nx
+        do j = 1, wk%ny
+            do i = 1, wk%nx
                 wk%abs_g(i,j) = sqrt(wk%gx(i,j)*wk%gx(i,j) + wk%gy(i,j)*wk%gy(i,j))
             end do
         end do
         !$omp end parallel do
 
+        call minus_gradients(wk%phi0_filled, wk%gx, wk%gy, dx, dy, periodic_x, periodic_y)
+
     end subroutine update_potential_gradients
 
     ! ============================================================
-    ! Stress-gradient-coupling smoothing of the potential gradients
+    ! Stress-gradient-coupling kernel and smoothing
     ! ============================================================
-    subroutine update_smoothed_potential_gradients(wk, dx, dy, mask, par)
-        ! Mirrors update_smoothed_potential_gradients! (water_flux.jl).
+    subroutine coupling_kernel(kernel, frb_x, frb_y, h_avg, dx, dy, par)
+        ! coupling_kernel (water_flux.jl): the normalised Kamb & Echelmeyer
+        ! (1986) cone for mean grounded-ice thickness h_avg.
         implicit none
-        type(k24_work_class), intent(INOUT) :: wk
-        real(dp),             intent(IN)    :: dx, dy, mask(:,:)
-        type(k24_param_class),intent(IN)    :: par
+        real(dp), allocatable, intent(OUT) :: kernel(:,:)
+        integer,               intent(OUT) :: frb_x, frb_y
+        real(dp),              intent(IN)  :: h_avg, dx, dy
+        type(k24_param_class), intent(IN)  :: par
 
-        real(dp), allocatable :: kernel(:,:)
-        real(dp) :: h_avg, scale, width, delta_min, dist, kernel_sum
-        integer  :: maxlevel_x, maxlevel_y, frb_x, frb_y, i, j, ni, nj, nx, ny
-
-        nx = wk%nx; ny = wk%ny
-
-        ! longcoupwater == 0 disables the smoothing entirely. Use this when the
-        ! coupling length is smaller than one grid cell (e.g. 16-32 km grids).
-        if (par%long_coupling_water == 0.0_dp) then
-            wk%gsx = wk%gx
-            wk%gsy = wk%gy
-            !$omp parallel do default(shared) private(i,j) schedule(static)
-            do j = 1, ny
-                do i = 1, nx
-                    wk%abs_gs(i,j) = abs(wk%gx(i,j)) + abs(wk%gy(i,j))
-                end do
-            end do
-            !$omp end parallel do
-            return
-        end if
-
-        ! Mean grounded-ice thickness, from the potential-filled h.
-        h_avg = max(masked_mean(wk%h, mask), 10.0_dp)
+        real(dp) :: scale, width, delta_min, dist, kernel_sum
+        integer  :: maxlevel_x, maxlevel_y, ni, nj
 
         scale = h_avg * par%long_coupling_water * 2.0_dp
 
-        ! Radius of the cone base. The effective coupling length is the
-        ! kernel's weighted mean distance from the centre, width/3 =
-        ! (4/3)*h_avg*longcoupwater -- about 6.7x ice thickness at
-        ! longcoupwater = 5, consistent with Kamb & Echelmeyer (1986).
+        ! Radius of the cone base (4*h_avg*longcoupwater). The effective
+        ! coupling length is the kernel's 2D area-weighted mean distance from
+        ! the centre, width/2 = 2*h_avg*longcoupwater = coupling_length_kamb86
+        ! * h_avg (10x ice thickness at the default). A 1D average over r,
+        ! ignoring the r dr area element, would give width/3 instead.
         width = 2.0_dp * scale
 
         delta_min = min(dx, dy)
         if (width <= delta_min) then
             ! Bump the cone scale so the kernel spans at least ~1 cell in the
-            ! tighter direction instead of degenerating to a no-op.
-            ! NOTE: `width` is deliberately NOT recomputed here, matching
-            ! FastHydrology.jl exactly. The previous Fortran implementation did
-            ! recompute it, which made the kernel a different size in this
-            ! (rare, very-fine-grid) branch.
+            ! tighter direction. `width` is deliberately NOT recomputed,
+            ! matching FastHydrology.jl.
             scale = delta_min / 2.0_dp + 1.0_dp
         end if
 
-        ! Kernel size, sized independently per axis so a dx /= dy grid does not
-        ! pay for the finer axis's resolution in both directions.
         maxlevel_x = 2 * round_half_even(width / dx - 0.5_dp) + 1
         maxlevel_y = 2 * round_half_even(width / dy - 0.5_dp) + 1
         frb_x = (maxlevel_x - 1) / 2
@@ -913,9 +1332,6 @@ contains
         allocate(kernel(maxlevel_x, maxlevel_y))
         do nj = 1, maxlevel_y
             do ni = 1, maxlevel_x
-                ! True physical (Euclidean) distance from the kernel centre,
-                ! using dx and dy separately, so the support is a circle in
-                ! physical space for any cell aspect ratio.
                 dist = sqrt( (dx * real(ni - frb_x - 1, dp))**2 + &
                              (dy * real(nj - frb_y - 1, dp))**2 ) / scale
                 kernel(ni,nj) = max(0.0_dp, 1.0_dp - dist / 2.0_dp)
@@ -924,8 +1340,30 @@ contains
         kernel_sum = sum(kernel)
         if (kernel_sum > 0.0_dp) kernel = kernel / kernel_sum
 
-        call imfilter_replicate_fftw(wk%gx, nx, ny, kernel, frb_x, frb_y, wk%gsx, par%periodic_x, par%periodic_y)
-        call imfilter_replicate_fftw(wk%gy, nx, ny, kernel, frb_x, frb_y, wk%gsy, par%periodic_x, par%periodic_y)
+    end subroutine coupling_kernel
+
+    subroutine update_smoothed_potential_gradients(wk, dx, dy, mask, par)
+        ! update_smoothed_potential_gradients! (water_flux.jl).
+        implicit none
+        type(k24_work_class), intent(INOUT) :: wk
+        real(dp),             intent(IN)    :: dx, dy, mask(:,:)
+        type(k24_param_class),intent(IN)    :: par
+
+        real(dp), allocatable :: kernel(:,:)
+        integer  :: frb_x, frb_y, i, j, nx, ny
+
+        nx = wk%nx; ny = wk%ny
+
+        if (par%long_coupling_water == 0.0_dp) then
+            wk%gsx = wk%gx
+            wk%gsy = wk%gy
+        else
+            ! Mean grounded-ice thickness, from the potential-filled h.
+            call coupling_kernel(kernel, frb_x, frb_y, max(masked_mean(wk%h, mask), 10.0_dp), dx, dy, par)
+            call imfilter_replicate_fftw(wk%gx, nx, ny, kernel, frb_x, frb_y, wk%gsx, par%periodic_x, par%periodic_y)
+            call imfilter_replicate_fftw(wk%gy, nx, ny, kernel, frb_x, frb_y, wk%gsy, par%periodic_x, par%periodic_y)
+            deallocate(kernel)
+        end if
 
         ! L1 magnitude, matching abs_grad_phi0_s in water_flux.jl.
         !$omp parallel do default(shared) private(i,j) schedule(static)
@@ -936,14 +1374,10 @@ contains
         end do
         !$omp end parallel do
 
-        deallocate(kernel)
-
     end subroutine update_smoothed_potential_gradients
 
     integer function round_half_even(x) result(r)
-        ! Round half to even, matching Julia's round(Int, x). Fortran's nint
-        ! rounds half away from zero, which would disagree on the exact .5
-        ! boundary that decides the kernel size.
+        ! Round half to even, matching Julia's round(Int, x).
         implicit none
         real(dp), intent(IN) :: x
         real(dp) :: f, diff
@@ -955,7 +1389,6 @@ contains
         else if (diff < 0.5_dp) then
             r = int(f)
         else
-            ! Exactly .5: pick the even neighbour.
             if (modulo(int(f), 2) == 0) then
                 r = int(f)
             else
@@ -968,25 +1401,16 @@ contains
     ! 2-D convolution via FFTW3, "replicate" border.
     ! ============================================================
     subroutine imfilter_replicate_fftw(input, nx, ny, kernel, frb_x, frb_y, output, periodic_x, periodic_y)
-        ! Cached_fft_convolve! (fft_convolution.jl) in Fortran: embed the input
-        ! in an (nx+2*frb_x, ny+2*frb_y) array with REPLICATE padding (nearest
-        ! edge extended), wrap the centred kernel around the array's origin,
-        ! multiply in the frequency domain, and crop back. In a periodic
-        ! direction the padding wraps instead (period n), which makes the
-        ! convolution circular there (Fortran-only).
+        ! cached_fft_convolve! (fft_convolution.jl) in Fortran: embed the input
+        ! in an (nx+2*frb_x, ny+2*frb_y) array with REPLICATE padding, wrap the
+        ! centred kernel around the array's origin, multiply in the frequency
+        ! domain, and crop back. In a periodic direction the padding wraps
+        ! instead (Fortran-only).
         !
-        ! Two fixes relative to the previous implementation:
-        !   * the padding was "reflect"; ImageFiltering's default -- which
-        !     FastHydrology.jl reproduces -- is "replicate".
-        !   * the crop offset was (i + 2*frb, j + 2*frb). The circular
-        !     convolution places the centred result at (i + frb, j + frb), so
-        !     the smoothed field came out translated by frb cells.
-        !
-        ! The FFT array is zero-padded from (nx+2*frb_x, ny+2*frb_y) up to the
-        ! next 5-smooth size purely for FFTW speed. That cannot change the
-        ! result: for an output cell p in [frb+1, frb+n] the circular sum only
-        ! reads indices p-d for |d| <= frb, i.e. [1, n+2*frb] -- always real
-        ! data, never the zeros or a wrapped-around neighbour.
+        ! The FFT array is zero-padded up to the next 7-smooth size (only
+        ! prime factors 2, 3, 5, 7), Julia's fft_size, for FFTW speed. That
+        ! cannot change the result: an output cell only reads inputs within
+        ! frb of it, never the zeros or a wrapped-around neighbour.
         !
         ! Link with -lfftw3.
         use, intrinsic :: iso_c_binding
@@ -1015,8 +1439,6 @@ contains
         work_a = 0.0_dp
         work_b = 0.0_dp
 
-        ! Replicate padding: clamp the source index to the domain (or wrap it,
-        ! in a periodic direction).
         !$omp parallel do default(shared) private(i,j,ii,jj) schedule(static)
         do j = 1, Npy
             do i = 1, Npx
@@ -1027,7 +1449,6 @@ contains
         end do
         !$omp end parallel do
 
-        ! Kernel offset (di,dj) goes to wrapped index mod(di,M)+1.
         do nj = 1, 2*frb_y+1
             do ni = 1, 2*frb_x+1
                 ii = modulo(ni - frb_x - 1, Mfft) + 1
@@ -1064,9 +1485,8 @@ contains
     end subroutine imfilter_replicate_fftw
 
     integer function next_smooth_size(n) result(m)
-        ! Smallest m >= n whose only prime factors are 2, 3 and 5 -- the sizes
-        ! FFTW has dedicated codelets for. Much less padding than rounding up
-        ! to a power of two (never more than ~20% over n, versus up to 100%).
+        ! Smallest m >= n whose only prime factors are 2, 3, 5 and 7 --
+        ! fft_size in fft_convolution.jl (nextprod((2, 3, 5, 7), n)).
         implicit none
         integer, intent(IN) :: n
         integer :: k
@@ -1077,6 +1497,7 @@ contains
             do while (modulo(k, 2) == 0); k = k / 2; end do
             do while (modulo(k, 3) == 0); k = k / 3; end do
             do while (modulo(k, 5) == 0); k = k / 5; end do
+            do while (modulo(k, 7) == 0); k = k / 7; end do
             if (k == 1) return
             m = m + 1
         end do
@@ -1098,26 +1519,266 @@ contains
     end function wrap_index
 
     ! ============================================================
-    ! Sliding law -> basal shear stress
+    ! Routing weights (routing.jl)
     ! ============================================================
-    subroutine update_tau_b(tau_b, N, uxy_b, par)
-        ! Mirrors update_tau_b! (sliding_law.jl). tau_b feeds the frictional
-        ! heating term tau_b*v_b/(L_w*rho_w) of the melt rate (Eq. 3, Sec.
-        ! 2.2.1 of Kazmierczak et al 2024).
+    pure real(dp) function routing_weight(sx, sy, di, dj, dx, dy) result(w)
+        ! Fraction of a cell's psi_out leaving through the face toward the
+        ! neighbour in direction (di, dj), given the cell's routing direction
+        ! (sx, sy): (sx*di*dy + sy*dj*dx) / (|sx|*dy + |sy|*dx). Positive only
+        ! when the flow leaves toward that neighbour; the denominator is
+        ! corfac*|s|, consistent with q = psi_out/corfac.
+        implicit none
+        real(dp), intent(IN) :: sx, sy, dx, dy
+        integer,  intent(IN) :: di, dj
+        w = (sx * real(di, dp) * dy + sy * real(dj, dp) * dx) &
+            / (abs(sx) * dy + abs(sy) * dx + epsilon(1.0_dp))
+    end function routing_weight
+
+    subroutine compute_routing_weights(wk, mask, dx, dy, par)
+        ! compute_routing_weights!: w8(d,i,j), the fraction of grounded cell
+        ! (i,j)'s outflow sent to its neighbour in direction d. Fractions sum
+        ! to 1, or 0 for a sink. Water sent to a non-grounded neighbour or off
+        ! the domain edge leaves the system.
+        implicit none
+        type(k24_work_class), intent(INOUT) :: wk
+        real(dp),             intent(IN)    :: mask(:,:), dx, dy
+        type(k24_param_class),intent(IN)    :: par
+        integer :: i, j
+
+        wk%w8 = 0.0_dp
+        !$omp parallel do default(shared) private(i,j) schedule(static)
+        do j = 1, wk%ny
+            do i = 1, wk%nx
+                if (mask(i,j) /= 1.0_dp) cycle
+                select case (par%routing_scheme)
+                    case (K24_ROUTE_GDS_WARNER)
+                        call weights_gds_warner(wk, i, j, dx, dy)
+                    case (K24_ROUTE_WARNER)
+                        call weights_warner(wk, i, j, dx, dy, par)
+                    case (K24_ROUTE_QUINN)
+                        call weights_quinn(wk, i, j, dx, dy, par)
+                    case (K24_ROUTE_TARBOTON)
+                        call weights_tarboton(wk, i, j, dx, dy, par)
+                    case default   ! MODIFIED_TARBOTON, GDS_TARBOTON
+                        call angle_split(wk, i, j, wk%gsx(i,j), wk%gsy(i,j), dx, dy)
+                end select
+            end do
+        end do
+        !$omp end parallel do
+
+    end subroutine compute_routing_weights
+
+    subroutine neighbour(i, j, d, nx, ny, par, ni, nj, inside)
+        implicit none
+        integer, intent(IN)  :: i, j, d, nx, ny
+        type(k24_param_class), intent(IN) :: par
+        integer, intent(OUT) :: ni, nj
+        logical, intent(OUT) :: inside
+        ni = wrap_index(i + K24_DIRS(1,d), nx, par%periodic_x)
+        nj = wrap_index(j + K24_DIRS(2,d), ny, par%periodic_y)
+        inside = (ni >= 1 .and. ni <= nx .and. nj >= 1 .and. nj <= ny)
+    end subroutine neighbour
+
+    subroutine weights_gds_warner(wk, i, j, dx, dy)
+        ! GDS-Warner: the routing direction's component toward each of the 4
+        ! neighbours (identical to routing_weight as the routing uses it).
+        implicit none
+        type(k24_work_class), intent(INOUT) :: wk
+        integer,  intent(IN) :: i, j
+        real(dp), intent(IN) :: dx, dy
+        integer :: d
+        do d = 1, 4
+            wk%w8(d,i,j) = max(0.0_dp, routing_weight(wk%gsx(i,j), wk%gsy(i,j), K24_DIRS(1,d), K24_DIRS(2,d), dx, dy))
+        end do
+    end subroutine weights_gds_warner
+
+    subroutine weights_warner(wk, i, j, dx, dy, par)
+        ! Warner (Budd & Warner 1996; Le Brocq Eq. 8): shared among the
+        ! downhill 4-neighbours in proportion to the potential drop, weighted
+        ! by face length / distance.
+        implicit none
+        type(k24_work_class), intent(INOUT) :: wk
+        integer,  intent(IN) :: i, j
+        real(dp), intent(IN) :: dx, dy
+        type(k24_param_class), intent(IN) :: par
+        integer  :: d, ni, nj
+        logical  :: inside
+        real(dp) :: p, tot, drop, v
+
+        p = wk%phi0_filled(i,j)
+        tot = 0.0_dp
+        do d = 1, 4
+            call neighbour(i, j, d, wk%nx, wk%ny, par, ni, nj, inside)
+            if (.not. inside) cycle
+            drop = p - wk%phi0_filled(ni,nj)
+            if (drop > 0.0_dp) then
+                if (d <= 2) then
+                    v = drop * (dy / dx)
+                else
+                    v = drop * (dx / dy)
+                end if
+                wk%w8(d,i,j) = v
+                tot = tot + v
+            end if
+        end do
+        if (tot > 0.0_dp) then
+            do d = 1, 4
+                wk%w8(d,i,j) = wk%w8(d,i,j) / tot
+            end do
+        end if
+    end subroutine weights_warner
+
+    subroutine weights_quinn(wk, i, j, dx, dy, par)
+        ! Quinn et al. (1991): as Warner over all 8 neighbours. Not
+        ! original: shares proportional to the drop (Le Brocq Eq. 8).
+        ! Original: slope times effective contour length.
+        implicit none
+        type(k24_work_class), intent(INOUT) :: wk
+        integer,  intent(IN) :: i, j
+        real(dp), intent(IN) :: dx, dy
+        type(k24_param_class), intent(IN) :: par
+        integer  :: d, ni, nj
+        logical  :: inside
+        real(dp) :: p, tot, drop, v, ddiag, Ldiag
+
+        p = wk%phi0_filled(i,j)
+        tot = 0.0_dp
+        ddiag = hypot(dx, dy)
+        Ldiag = sqrt(2.0_dp) / 4.0_dp * sqrt(dx * dy)
+        do d = 1, 8
+            call neighbour(i, j, d, wk%nx, wk%ny, par, ni, nj, inside)
+            if (.not. inside) cycle
+            drop = p - wk%phi0_filled(ni,nj)
+            if (drop > 0.0_dp) then
+                if (.not. par%quinn_original) then
+                    v = drop
+                else if (d <= 2) then
+                    v = drop / dx * (dy / 2.0_dp)
+                else if (d <= 4) then
+                    v = drop / dy * (dx / 2.0_dp)
+                else
+                    v = drop / ddiag * Ldiag
+                end if
+                wk%w8(d,i,j) = v
+                tot = tot + v
+            end if
+        end do
+        if (tot > 0.0_dp) then
+            do d = 1, 8
+                wk%w8(d,i,j) = wk%w8(d,i,j) / tot
+            end do
+        end if
+    end subroutine weights_quinn
+
+    subroutine weights_tarboton(wk, i, j, dx, dy, par)
+        ! Tarboton (1997) D-infinity: steepest downhill direction over the 8
+        ! triangular facets; the outflow goes to the facet's cardinal and
+        ! diagonal neighbours in proportion to the flow angle.
+        implicit none
+        type(k24_work_class), intent(INOUT) :: wk
+        integer,  intent(IN) :: i, j
+        real(dp), intent(IN) :: dx, dy
+        type(k24_param_class), intent(IN) :: par
+        integer  :: f, c1, c2, best, i1, j1, i2, j2
+        logical  :: in1, in2
+        real(dp) :: e0, e1, e2, d1, d2, s1, s2, amax, r, s
+        real(dp) :: best_s, best_r, best_amax
+
+        e0 = wk%phi0_filled(i,j)
+        best_s = 0.0_dp; best = 0; best_r = 0.0_dp; best_amax = 1.0_dp
+        do f = 1, 8
+            c1 = K24_FACETS(1,f); c2 = K24_FACETS(2,f)
+            call neighbour(i, j, c1, wk%nx, wk%ny, par, i1, j1, in1)
+            call neighbour(i, j, c2, wk%nx, wk%ny, par, i2, j2, in2)
+            if (.not. (in1 .and. in2)) cycle
+            e1 = wk%phi0_filled(i1,j1); e2 = wk%phi0_filled(i2,j2)
+            if (c1 <= 2) then
+                d1 = dx; d2 = dy
+            else
+                d1 = dy; d2 = dx
+            end if
+            s1 = (e0 - e1) / d1
+            s2 = (e1 - e2) / d2
+            amax = atan2(d2, d1)
+            r = atan2(s2, s1)
+            s = hypot(s1, s2)
+            if (r < 0.0_dp) then
+                r = 0.0_dp; s = s1
+            else if (r > amax) then
+                r = amax; s = (e0 - e2) / hypot(d1, d2)
+            end if
+            if (s > best_s) then
+                best_s = s; best = f; best_r = r; best_amax = amax
+            end if
+        end do
+        if (best == 0) return
+        c1 = K24_FACETS(1,best); c2 = K24_FACETS(2,best)
+        wk%w8(c2,i,j) = best_r / best_amax
+        wk%w8(c1,i,j) = 1.0_dp - best_r / best_amax
+    end subroutine weights_tarboton
+
+    subroutine angle_split(wk, i, j, fx, fy, dx, dy)
+        ! Modified Tarboton / GDS-Tarboton (Le Brocq Sec. 3): one flow
+        ! direction (fx, fy) split between the two of the 8 neighbours whose
+        ! directions bracket it, in proportion to the angles.
+        implicit none
+        type(k24_work_class), intent(INOUT) :: wk
+        integer,  intent(IN) :: i, j
+        real(dp), intent(IN) :: fx, fy, dx, dy
+        integer, parameter :: dirs(8) = [2, 8, 4, 7, 1, 5, 3, 6]
+        real(dp) :: a, angs(8), theta, lo, hi, frac
+        integer  :: k, m, k2
+
+        if (fx == 0.0_dp .and. fy == 0.0_dp) return
+        a = atan2(dy, dx)
+        angs = [0.0_dp, a, K24_PI / 2.0_dp, K24_PI - a, K24_PI * 1.0_dp, K24_PI + a, &
+                3.0_dp * K24_PI / 2.0_dp, 2.0_dp * K24_PI - a]
+        ! mod(atan(fy, fx), 2pi): atan2 is in (-pi, pi], so this is exact.
+        theta = atan2(fy, fx)
+        if (theta < 0.0_dp) theta = theta + 2.0_dp * K24_PI
+        k = 8
+        do m = 1, 7
+            if (angs(m) <= theta .and. theta < angs(m+1)) then
+                k = m
+                exit
+            end if
+        end do
+        lo = angs(k)
+        if (k == 8) then
+            hi = 2.0_dp * K24_PI
+            k2 = 1
+        else
+            hi = angs(k+1)
+            k2 = k + 1
+        end if
+        frac = (theta - lo) / (hi - lo)
+        wk%w8(dirs(k),i,j)  = wk%w8(dirs(k),i,j)  + (1.0_dp - frac)
+        wk%w8(dirs(k2),i,j) = wk%w8(dirs(k2),i,j) + frac
+    end subroutine angle_split
+
+    ! ============================================================
+    ! Sliding law -> basal shear stress, and the frictional heat
+    ! ============================================================
+    subroutine update_tau_b(tau_b, N, uxy_b, lambda, par, tau_b_in, c_till_in)
+        ! Mirrors update_tau_b! (sliding_law.jl).
         implicit none
         real(dp), intent(OUT) :: tau_b(:,:)
-        real(dp), intent(IN)  :: N(:,:), uxy_b(:,:)
+        real(dp), intent(IN)  :: N(:,:), uxy_b(:,:), lambda(:,:)
         type(k24_param_class), intent(IN) :: par
+        real(dp), intent(IN), optional :: tau_b_in(:,:), c_till_in(:,:)
 
         integer  :: i, j, nx, ny
-        real(dp) :: C, qe, c_till, u0
+        real(dp) :: C, qe, c_till, u0, n_s, inv_n
 
         nx = size(tau_b,1); ny = size(tau_b,2)
 
         select case (par%sliding_law)
 
-            case (K24_SLIDING_PRESCRIBED_FRICTION)
+            case (K24_SLIDING_NO_FRICTION)
                 tau_b = 0.0_dp
+
+            case (K24_SLIDING_PRESCRIBED_FIELD)
+                tau_b = tau_b_in
 
             case (K24_SLIDING_WEERTMAN)
                 C = par%weertman_C; qe = par%weertman_q
@@ -1154,8 +1815,33 @@ contains
                 end do
                 !$omp end parallel do
 
+            case (K24_SLIDING_REG_COULOMB_FIELD)
+                qe = par%reg_coulomb_q
+                u0 = par%reg_coulomb_u0
+                !$omp parallel do default(shared) private(i,j) schedule(static)
+                do j = 1, ny
+                    do i = 1, nx
+                        tau_b(i,j) = c_till_in(i,j) * N(i,j) * &
+                                     (uxy_b(i,j) / (uxy_b(i,j) + u0))**qe
+                    end do
+                end do
+                !$omp end parallel do
+
+            case (K24_SLIDING_SHAKTI_REG_COULOMB)
+                C     = par%shakti_C
+                n_s   = par%shakti_n
+                inv_n = 1.0_dp / n_s
+                !$omp parallel do default(shared) private(i,j) schedule(static)
+                do j = 1, ny
+                    do i = 1, nx
+                        tau_b(i,j) = C * N(i,j) * &
+                            (uxy_b(i,j) / (uxy_b(i,j) + abs(N(i,j))**n_s * lambda(i,j)))**inv_n
+                    end do
+                end do
+                !$omp end parallel do
+
             case default
-                write(*,*) "update_tau_b:: error: k24_sliding_law must be one of [0,1,2,3]."
+                write(*,*) "update_tau_b:: error: k24_sliding_law must be one of [0,1,2,3,4,5,6]."
                 write(*,*) "sliding_law = ", par%sliding_law
                 stop
 
@@ -1163,276 +1849,461 @@ contains
 
     end subroutine update_tau_b
 
-    ! ============================================================
-    ! Water-flux fixed point
-    ! ============================================================
-    subroutine resolve_q(q, N, wk, mask, mdot, uxy_b, A_glen, kappa, H_ice, dx, dy, par)
-        ! Mirrors the three resolve_q! methods (water_flux.jl):
-        !
-        !   * N-independent law (PRESCRIBED_FRICTION/WEERTMAN), dissipation off -- one pass.
-        !   * N-independent law, dissipation on -- Picard on q alone.
-        !   * N-dependent law (POWER_PLASTIC/REG_COULOMB) -- joint (q, N)
-        !     Picard, regardless of the dissipation setting.
-        !
-        ! par%mdot_includes_friction independently decides whether tau_b is
-        ! actually added to mdot_total in any of the three (see
-        ! par%mdot_includes_friction's declaration above) -- it does not change
-        ! which of the three subroutines runs.
+    logical function pressure_dependent_law(par)
         implicit none
-        real(dp),             intent(INOUT) :: q(:,:), N(:,:)
+        type(k24_param_class), intent(IN) :: par
+        pressure_dependent_law = (par%sliding_law == K24_SLIDING_POWER_PLASTIC)     .or. &
+                                 (par%sliding_law == K24_SLIDING_REG_COULOMB)       .or. &
+                                 (par%sliding_law == K24_SLIDING_REG_COULOMB_FIELD) .or. &
+                                 (par%sliding_law == K24_SLIDING_SHAKTI_REG_COULOMB)
+    end function pressure_dependent_law
+
+    subroutine add_friction_term(wk, uxy_b, par, ux_b, uy_b)
+        ! add_friction_term!: Q_b [W/m2] from the current tau_b, per
+        ! friction_discretization, and Q_b/L_w added to mdot_total.
+        implicit none
         type(k24_work_class), intent(INOUT) :: wk
-        real(dp),             intent(IN)    :: mask(:,:), mdot(:,:), uxy_b(:,:)
-        real(dp),             intent(IN)    :: A_glen(:,:), kappa(:,:), H_ice(:,:)
-        real(dp),             intent(IN)    :: dx, dy
+        real(dp),             intent(IN)    :: uxy_b(:,:)
         type(k24_param_class),intent(IN)    :: par
-
-        logical :: pressure_dependent
-
-        pressure_dependent = (par%sliding_law == K24_SLIDING_POWER_PLASTIC) .or. &
-                             (par%sliding_law == K24_SLIDING_REG_COULOMB)
-
-        if (pressure_dependent) then
-            call resolve_q_coupled(q, N, wk, mask, mdot, uxy_b, A_glen, kappa, H_ice, dx, dy, par)
-        else if (par%dissipation_melt) then
-            call resolve_q_dissipation(q, N, wk, mask, mdot, uxy_b, dx, dy, par)
-        else
-            call resolve_q_single(q, N, wk, mask, mdot, uxy_b, dx, dy, par)
-        end if
-
-    end subroutine resolve_q
-
-    subroutine set_q_from_psi_out(q, wk, par)
-        implicit none
-        real(dp),             intent(OUT) :: q(:,:)
-        type(k24_work_class), intent(IN)  :: wk
-        type(k24_param_class),intent(IN)  :: par
+        real(dp), intent(IN), optional      :: ux_b(:,:), uy_b(:,:)
         integer :: i, j
 
-        !$omp parallel do default(shared) private(i,j) schedule(static)
-        do j = 1, wk%ny
-            do i = 1, wk%nx
-                ! DEVIATION: corfac is exactly zero only where the smoothed
-                ! gradient vanishes in both directions, i.e. where there is no
-                ! flow direction at all. Julia divides regardless and lets the
-                ! cell go to Inf or NaN; taking q = 0 there is the physical
-                ! limit and keeps -Ofast from producing something arbitrary.
-                if (wk%corfac(i,j) > 0.0_dp) then
-                    q(i,j) = min(max(wk%psi_out(i,j) / wk%corfac(i,j), par%q_min), par%q_max)
-                else
-                    q(i,j) = min(max(0.0_dp, par%q_min), par%q_max)
-                end if
-            end do
-        end do
-        !$omp end parallel do
-    end subroutine set_q_from_psi_out
-
-    subroutine resolve_q_single(q, N, wk, mask, mdot, uxy_b, dx, dy, par)
-        ! Dissipation off and an N-independent sliding law: the water source
-        ! depends on neither q nor N, so a single routing pass is exact.
-        implicit none
-        real(dp),             intent(INOUT) :: q(:,:)
-        real(dp),             intent(IN)    :: N(:,:)
-        type(k24_work_class), intent(INOUT) :: wk
-        real(dp),             intent(IN)    :: mask(:,:), mdot(:,:), uxy_b(:,:), dx, dy
-        type(k24_param_class),intent(IN)    :: par
-
-        integer  :: i, j
-        real(dp) :: rL
-
-        call update_tau_b(wk%tau_b, N, uxy_b, par)
-
-        rL = par%latent_heat_water * par%water_density
-        if (par%mdot_includes_friction) then
-            wk%mdot_total = mdot
+        if (par%friction_discretization == K24_FRICTION_STAGGERED) then
+            call staggered_friction(wk%Q_b, wk%tau_b, uxy_b, ux_b, uy_b, par)
         else
             !$omp parallel do default(shared) private(i,j) schedule(static)
             do j = 1, wk%ny
                 do i = 1, wk%nx
-                    wk%mdot_total(i,j) = mdot(i,j) + wk%tau_b(i,j) * uxy_b(i,j) / rL
+                    wk%Q_b(i,j) = wk%tau_b(i,j) * uxy_b(i,j)
                 end do
             end do
             !$omp end parallel do
         end if
 
-        call update_psi_out(wk, mask, dx, dy, par)
-        call set_q_from_psi_out(q, wk, par)
+        !$omp parallel do default(shared) private(i,j) schedule(static)
+        do j = 1, wk%ny
+            do i = 1, wk%nx
+                wk%mdot_total(i,j) = wk%mdot_total(i,j) + wk%Q_b(i,j) / par%latent_heat_water
+            end do
+        end do
+        !$omp end parallel do
 
-    end subroutine resolve_q_single
+    end subroutine add_friction_term
 
-    subroutine resolve_q_dissipation(q, N, wk, mask, mdot, uxy_b, dx, dy, par)
-        ! Dissipation on and an N-independent sliding law: mdot_total depends
-        ! on q through |q*grad(phi0)|/(L_w*rho_w) only, so Picard-iterate on q.
+    subroutine staggered_friction(Q_b, tau_b, uxy_b, ux, uy, par)
+        ! staggered_friction_kernel! (sliding_law.jl): C-grid frictional heat.
+        ! beta = tau_b/max(|u_b|, u_floor) at centres is averaged to each face
+        ! to form the face tractions; the heat is formed on the faces
+        ! (quadrature off) or at 2x2 Gauss points (Yelmo's qb_method = 2).
+        ! Domain-edge faces use the one cell they have; periodic directions
+        ! wrap (Fortran-only).
         implicit none
-        real(dp),             intent(INOUT) :: q(:,:)
-        real(dp),             intent(IN)    :: N(:,:)
-        type(k24_work_class), intent(INOUT) :: wk
-        real(dp),             intent(IN)    :: mask(:,:), mdot(:,:), uxy_b(:,:), dx, dy
-        type(k24_param_class),intent(IN)    :: par
+        real(dp), intent(OUT) :: Q_b(:,:)
+        real(dp), intent(IN)  :: tau_b(:,:), uxy_b(:,:), ux(:,:), uy(:,:)
+        type(k24_param_class), intent(IN) :: par
 
-        integer  :: i, j, iter, n_iters
-        real(dp) :: rL, q_scale
-        logical  :: converged
+        real(dp), allocatable :: tx(:,:), ty(:,:), beta(:,:)
+        real(dp) :: cux(4), cuy(4), ctx(4), cty(4), acc, s3, pts(2,4)
+        integer  :: i, j, nx, ny, im1, ip1, jm1, jp1, k
 
-        call update_tau_b(wk%tau_b, N, uxy_b, par)
+        nx = size(Q_b,1); ny = size(Q_b,2)
+        allocate(tx(nx,ny), ty(nx,ny), beta(nx,ny))
 
-        rL        = par%latent_heat_water * par%water_density
-        converged = .FALSE.
-        n_iters   = par%max_dissipation_iters
-
-        do iter = 1, par%max_dissipation_iters
-
-            wk%q_prev = q
-
-            ! Total source: basal melt, the (fixed) frictional-heating term
-            ! (skipped if par%mdot_includes_friction, since mdot already
-            ! carries it), and the dissipation melt from the current q. Zero
-            ! on the first sweep of a cold start, since q begins at zero.
-            if (par%mdot_includes_friction) then
-                !$omp parallel do default(shared) private(i,j) schedule(static)
-                do j = 1, wk%ny
-                    do i = 1, wk%nx
-                        wk%mdot_total(i,j) = mdot(i,j) + abs(q(i,j) * wk%abs_g(i,j)) / rL
-                    end do
-                end do
-                !$omp end parallel do
-            else
-                !$omp parallel do default(shared) private(i,j) schedule(static)
-                do j = 1, wk%ny
-                    do i = 1, wk%nx
-                        wk%mdot_total(i,j) = mdot(i,j) &
-                            + wk%tau_b(i,j) * uxy_b(i,j) / rL &
-                            + abs(q(i,j) * wk%abs_g(i,j)) / rL
-                    end do
-                end do
-                !$omp end parallel do
-            end if
-
-            call update_psi_out(wk, mask, dx, dy, par)
-            call set_q_from_psi_out(q, wk, par)
-
-            q_scale = max(masked_max_abs(q, mask), 1.0e-15_dp)
-            if (masked_max_abs_diff(q, wk%q_prev, mask) <= par%dissipation_rtol * q_scale) then
-                converged = .TRUE.
-                n_iters   = iter
-                exit
-            end if
-
+        do j = 1, ny
+            do i = 1, nx
+                beta(i,j) = tau_b(i,j) / max(uxy_b(i,j), par%friction_u_floor)
+            end do
         end do
 
-        if (par%dissipation_verbose) then
-            if (converged) then
-                write(*,'(a,i0,a)') " k24: water flux Picard loop converged after ", n_iters, " iteration(s)."
-            else
-                write(*,'(a,i0,a)') " k24: water flux Picard loop did NOT converge (hit max_dissipation_iters = ", n_iters, ")."
-            end if
-        end if
+        do j = 1, ny
+            do i = 1, nx
+                ip1 = min(wrap_index(i+1, nx, par%periodic_x), nx)
+                jp1 = min(wrap_index(j+1, ny, par%periodic_y), ny)
+                tx(i,j) = (beta(i,j) + beta(ip1,j)) / 2.0_dp * ux(i,j)
+                ty(i,j) = (beta(i,j) + beta(i,jp1)) / 2.0_dp * uy(i,j)
+            end do
+        end do
 
-    end subroutine resolve_q_dissipation
+        s3 = 1.0_dp / sqrt(3.0_dp)
+        pts = reshape([-s3,-s3,  s3,-s3,  s3,s3,  -s3,s3], [2,4])
 
-    subroutine resolve_q_coupled(q, N, wk, mask, mdot, uxy_b, A_glen, kappa, H_ice, dx, dy, par)
-        ! N-dependent sliding law: tau_b depends on N, which is downstream of
-        ! q, so q and N form a joint fixed point. Each sweep recomputes tau_b
-        ! from the current N, routes q, then refreshes N from the new q.
-        !
-        ! N starts from whatever the caller passed in (zero on a cold start),
-        ! so the first sweep's tau_b is zero and ramps up -- ordinary Picard
-        ! behaviour, not a bug.
+        do j = 1, ny
+            do i = 1, nx
+                im1 = max(wrap_index(i-1, nx, par%periodic_x), 1); ip1 = min(wrap_index(i+1, nx, par%periodic_x), nx)
+                jm1 = max(wrap_index(j-1, ny, par%periodic_y), 1); jp1 = min(wrap_index(j+1, ny, par%periodic_y), ny)
+                if (par%friction_quadrature) then
+                    call acx_corners(ux, i, j, im1, jm1, jp1, cux)
+                    call acy_corners(uy, i, j, im1, ip1, jm1, cuy)
+                    call acx_corners(tx, i, j, im1, jm1, jp1, ctx)
+                    call acy_corners(ty, i, j, im1, ip1, jm1, cty)
+                    acc = 0.0_dp
+                    do k = 1, 4
+                        acc = acc + hypot(gq_interp(cux, pts(:,k)), gq_interp(cuy, pts(:,k))) &
+                                  * hypot(gq_interp(ctx, pts(:,k)), gq_interp(cty, pts(:,k)))
+                    end do
+                    Q_b(i,j) = acc / 4.0_dp
+                else
+                    Q_b(i,j) = (tx(im1,j) * ux(im1,j) + tx(i,j) * ux(i,j)) / 2.0_dp &
+                             + (ty(i,jm1) * uy(i,jm1) + ty(i,j) * uy(i,j)) / 2.0_dp
+                end if
+            end do
+        end do
+
+        deallocate(tx, ty, beta)
+
+    end subroutine staggered_friction
+
+    pure real(dp) function gq_interp(c, p) result(v)
+        ! Bilinear shape functions of the SW, SE, NE, NW corners at point p of
+        ! the reference cell [-1, 1]^2 (Yelmo's gq2D).
+        implicit none
+        real(dp), intent(IN) :: c(4), p(2)
+        v = ((1.0_dp - p(1)) * (1.0_dp - p(2)) * c(1) + (1.0_dp + p(1)) * (1.0_dp - p(2)) * c(2) + &
+             (1.0_dp + p(1)) * (1.0_dp + p(2)) * c(3) + (1.0_dp - p(1)) * (1.0_dp + p(2)) * c(4)) / 4.0_dp
+    end function gq_interp
+
+    pure subroutine acx_corners(F, i, j, im1, jm1, jp1, c)
+        ! Corner (ab-node) values of an acx field around cell (i, j): SW, SE, NE, NW.
+        implicit none
+        real(dp), intent(IN)  :: F(:,:)
+        integer,  intent(IN)  :: i, j, im1, jm1, jp1
+        real(dp), intent(OUT) :: c(4)
+        c(1) = (F(im1,jm1) + F(im1,j)) / 2.0_dp
+        c(2) = (F(i,jm1)   + F(i,j))   / 2.0_dp
+        c(3) = (F(i,j)     + F(i,jp1)) / 2.0_dp
+        c(4) = (F(im1,j)   + F(im1,jp1)) / 2.0_dp
+    end subroutine acx_corners
+
+    pure subroutine acy_corners(F, i, j, im1, ip1, jm1, c)
+        ! Corner (ab-node) values of an acy field around cell (i, j): SW, SE, NE, NW.
+        implicit none
+        real(dp), intent(IN)  :: F(:,:)
+        integer,  intent(IN)  :: i, j, im1, ip1, jm1
+        real(dp), intent(OUT) :: c(4)
+        c(1) = (F(im1,jm1) + F(i,jm1))   / 2.0_dp
+        c(2) = (F(i,jm1)   + F(ip1,jm1)) / 2.0_dp
+        c(3) = (F(i,j)     + F(ip1,j))   / 2.0_dp
+        c(4) = (F(im1,j)   + F(i,j))     / 2.0_dp
+    end subroutine acy_corners
+
+    ! ============================================================
+    ! Water-flux fixed point
+    ! ============================================================
+    subroutine resolve_q(q, N, wk, mask, i_eb, uxy_b, A_glen, kappa, H_ice, dx, dy, par, &
+                         ux_b, uy_b, tau_b_in, c_till_in)
+        ! Mirrors the three resolve_q! methods (water_flux.jl):
+        !   * N-independent law (NO_FRICTION/WEERTMAN/PRESCRIBED_FIELD),
+        !     dissipation off -- one pass.
+        !   * N-independent law, dissipation on -- Picard on q alone.
+        !   * N-dependent law -- joint (q, N) Picard, regardless of the
+        !     dissipation setting.
+        ! Every sweep rebuilds the source from its terms:
+        !   mdot_total = mdot_fixed + i_eb, += Q_b/L_w, += Q_diss/L_w.
         implicit none
         real(dp),             intent(INOUT) :: q(:,:), N(:,:)
         type(k24_work_class), intent(INOUT) :: wk
-        real(dp),             intent(IN)    :: mask(:,:), mdot(:,:), uxy_b(:,:)
+        real(dp),             intent(IN)    :: mask(:,:), i_eb(:,:), uxy_b(:,:)
         real(dp),             intent(IN)    :: A_glen(:,:), kappa(:,:), H_ice(:,:)
         real(dp),             intent(IN)    :: dx, dy
         type(k24_param_class),intent(IN)    :: par
+        real(dp), intent(IN), optional      :: ux_b(:,:), uy_b(:,:), tau_b_in(:,:), c_till_in(:,:)
 
-        integer  :: i, j, iter, n_iters
-        real(dp) :: rL, q_scale, N_scale
+        integer  :: iter, n_iters
+        real(dp) :: q_scale, N_scale
         logical  :: converged, q_ok, N_ok
 
-        rL        = par%latent_heat_water * par%water_density
-        converged = .FALSE.
-        n_iters   = par%max_coupling_iters
+        if (pressure_dependent_law(par)) then
 
-        do iter = 1, par%max_coupling_iters
+            converged = .FALSE.
+            n_iters   = par%max_coupling_iters
 
-            wk%q_prev = q
-            wk%N_prev = N
+            do iter = 1, par%max_coupling_iters
 
-            call update_tau_b(wk%tau_b, N, uxy_b, par)
+                wk%q_prev = q
+                wk%N_prev = N
 
-            if (par%mdot_includes_friction) then
-                wk%mdot_total = mdot
-            else
-                !$omp parallel do default(shared) private(i,j) schedule(static)
-                do j = 1, wk%ny
-                    do i = 1, wk%nx
-                        wk%mdot_total(i,j) = mdot(i,j) + wk%tau_b(i,j) * uxy_b(i,j) / rL
-                    end do
-                end do
-                !$omp end parallel do
+                call update_tau_b(wk%tau_b, N, uxy_b, wk%lambda, par, tau_b_in, c_till_in)
+                call reset_source(wk, i_eb)
+                call add_friction_term(wk, uxy_b, par, ux_b, uy_b)
+                call add_dissipation_term(wk, q, par)
+
+                call update_psi_out(wk, mask, dx, dy, par)
+                call update_q_from_psi_out(q, wk, mask, dx, dy, par)
+
+                call update_N(N, q, wk, mask, uxy_b, A_glen, kappa, H_ice, par)
+
+                q_scale = max(masked_max_abs(q, mask), epsilon(1.0_dp))
+                N_scale = max(masked_max_abs(N, mask), epsilon(1.0_dp))
+                q_ok = masked_max_abs_diff(q, wk%q_prev, mask) <= par%coupling_rtol * q_scale
+                N_ok = masked_max_abs_diff(N, wk%N_prev, mask) <= par%coupling_rtol * N_scale
+
+                if (q_ok .and. N_ok) then
+                    converged = .TRUE.
+                    n_iters   = iter
+                    exit
+                end if
+
+            end do
+
+            if (par%coupling_verbose) then
+                if (converged) then
+                    write(*,'(a,i0,a)') " k24: (q,N) coupling Picard loop converged after ", n_iters, " iteration(s)."
+                else
+                    write(*,'(a,i0,a)') " k24: (q,N) coupling Picard loop did NOT converge (hit max_coupling_iters = ", n_iters, ")."
+                end if
             end if
 
-            if (par%dissipation_melt) then
-                !$omp parallel do default(shared) private(i,j) schedule(static)
-                do j = 1, wk%ny
-                    do i = 1, wk%nx
-                        wk%mdot_total(i,j) = wk%mdot_total(i,j) &
-                            + abs(q(i,j) * wk%abs_g(i,j)) / rL
-                    end do
-                end do
-                !$omp end parallel do
+        else if (par%dissipation_melt) then
+
+            converged = .FALSE.
+            n_iters   = par%max_dissipation_iters
+
+            call update_tau_b(wk%tau_b, N, uxy_b, wk%lambda, par, tau_b_in, c_till_in)
+
+            do iter = 1, par%max_dissipation_iters
+
+                wk%q_prev = q
+
+                ! Dissipation from the current q (zero on the first sweep of a
+                ! cold start, since q begins at zero).
+                call reset_source(wk, i_eb)
+                call add_friction_term(wk, uxy_b, par, ux_b, uy_b)
+                call add_dissipation_term(wk, q, par)
+
+                call update_psi_out(wk, mask, dx, dy, par)
+                call update_q_from_psi_out(q, wk, mask, dx, dy, par)
+
+                q_scale = max(masked_max_abs(q, mask), epsilon(1.0_dp))
+                if (masked_max_abs_diff(q, wk%q_prev, mask) <= par%dissipation_rtol * q_scale) then
+                    converged = .TRUE.
+                    n_iters   = iter
+                    exit
+                end if
+
+            end do
+
+            if (par%dissipation_verbose) then
+                if (converged) then
+                    write(*,'(a,i0,a)') " k24: water flux Picard loop converged after ", n_iters, " iteration(s)."
+                else
+                    write(*,'(a,i0,a)') " k24: water flux Picard loop did NOT converge (hit max_dissipation_iters = ", n_iters, ")."
+                end if
             end if
+
+        else
+
+            ! The source depends on neither q nor N: one routing pass is exact.
+            call update_tau_b(wk%tau_b, N, uxy_b, wk%lambda, par, tau_b_in, c_till_in)
+            call reset_source(wk, i_eb)
+            call add_friction_term(wk, uxy_b, par, ux_b, uy_b)
+            wk%Q_diss = 0.0_dp
 
             call update_psi_out(wk, mask, dx, dy, par)
-            call set_q_from_psi_out(q, wk, par)
+            call update_q_from_psi_out(q, wk, mask, dx, dy, par)
 
-            call update_N(N, q, wk, uxy_b, A_glen, kappa, H_ice, par)
-
-            q_scale = max(masked_max_abs(q, mask), 1.0e-15_dp)
-            N_scale = max(masked_max_abs(N, mask), 1.0e-15_dp)
-            q_ok = masked_max_abs_diff(q, wk%q_prev, mask) <= par%coupling_rtol * q_scale
-            N_ok = masked_max_abs_diff(N, wk%N_prev, mask) <= par%coupling_rtol * N_scale
-
-            if (q_ok .and. N_ok) then
-                converged = .TRUE.
-                n_iters   = iter
-                exit
-            end if
-
-        end do
-
-        if (par%coupling_verbose) then
-            if (converged) then
-                write(*,'(a,i0,a)') " k24: (q,N) coupling Picard loop converged after ", n_iters, " iteration(s)."
-            else
-                write(*,'(a,i0,a)') " k24: (q,N) coupling Picard loop did NOT converge (hit max_coupling_iters = ", n_iters, ")."
-            end if
         end if
 
-    end subroutine resolve_q_coupled
+    end subroutine resolve_q
+
+    subroutine reset_source(wk, i_eb)
+        implicit none
+        type(k24_work_class), intent(INOUT) :: wk
+        real(dp),             intent(IN)    :: i_eb(:,:)
+        integer :: i, j
+        !$omp parallel do default(shared) private(i,j) schedule(static)
+        do j = 1, wk%ny
+            do i = 1, wk%nx
+                wk%mdot_total(i,j) = wk%mdot_fixed(i,j) + i_eb(i,j)
+            end do
+        end do
+        !$omp end parallel do
+    end subroutine reset_source
+
+    subroutine add_dissipation_term(wk, q, par)
+        ! add_dissipation_term!: Q_diss [W/m2] and Q_diss/L_w added to
+        ! mdot_total, per dissipation_discretization; Q_diss = 0 when off.
+        ! FACE uses the face-assembled dissipation of the previous q
+        ! conversion (wk%diss, [kg/m2/s]).
+        implicit none
+        type(k24_work_class), intent(INOUT) :: wk
+        real(dp),             intent(IN)    :: q(:,:)
+        type(k24_param_class),intent(IN)    :: par
+        integer :: i, j
+
+        if (.not. par%dissipation_melt) then
+            wk%Q_diss = 0.0_dp
+            return
+        end if
+
+        if (par%diss_disc == K24_DISS_FACE) then
+            !$omp parallel do default(shared) private(i,j) schedule(static)
+            do j = 1, wk%ny
+                do i = 1, wk%nx
+                    wk%Q_diss(i,j)     = wk%diss(i,j) * par%latent_heat_water
+                    wk%mdot_total(i,j) = wk%mdot_total(i,j) + wk%diss(i,j)
+                end do
+            end do
+            !$omp end parallel do
+        else
+            !$omp parallel do default(shared) private(i,j) schedule(static)
+            do j = 1, wk%ny
+                do i = 1, wk%nx
+                    wk%Q_diss(i,j)     = abs(q(i,j) * wk%abs_g(i,j))
+                    wk%mdot_total(i,j) = wk%mdot_total(i,j) + wk%Q_diss(i,j) / par%latent_heat_water
+                end do
+            end do
+            !$omp end parallel do
+        end if
+
+    end subroutine add_dissipation_term
 
     ! ============================================================
-    ! Flow routing: dispatcher + three implementations
+    ! Routed flux -> q (routing.jl)
     ! ============================================================
-    ! All three compute the same field -- psi_out, the accumulated upstream
-    ! water-potential outflow per cell [m3/s]. Mirrors route_psi_out!
-    ! (water_flux.jl) dispatching on AbstractPsiOutAlgorithm.
+    subroutine update_q_from_psi_out(q, wk, mask, dx, dy, par)
+        ! update_q_from_psi_out!: face fluxes first if any option needs them,
+        ! then q per q_conversion, clamped to [q_min, q_max].
+        implicit none
+        real(dp),             intent(OUT)   :: q(:,:)
+        type(k24_work_class), intent(INOUT) :: wk
+        real(dp),             intent(IN)    :: mask(:,:), dx, dy
+        type(k24_param_class),intent(IN)    :: par
+        integer  :: i, j
+        real(dp) :: v, qx, qy, epsT
+
+        if (needs_face_fluxes(par)) call update_face_fluxes(wk, mask, dx, dy, par)
+
+        if (par%q_conv == K24_QCONV_FACE_AVERAGE) then
+            ! Face fluxes -> face-normal q (Fx/dy, Fy/dx) -> averaged to the
+            ! centre per component -> |q|.
+            !$omp parallel do default(shared) private(i,j,v,qx,qy) schedule(static)
+            do j = 1, wk%ny
+                do i = 1, wk%nx
+                    v = 0.0_dp
+                    if (mask(i,j) == 1.0_dp) then
+                        qx = (wk%Fx(i,j) + wk%Fx(i+1,j)) / (2.0_dp * dy)
+                        qy = (wk%Fy(i,j) + wk%Fy(i,j+1)) / (2.0_dp * dx)
+                        v  = hypot(qx, qy)
+                    end if
+                    q(i,j) = min(max(v, par%q_min), par%q_max)
+                end do
+            end do
+            !$omp end parallel do
+        else
+            ! Le Brocq Eq. 9 / K24: q = psi_out / corfac. eps keeps a cell with
+            ! no flow direction finite (0 for psi_out == 0).
+            epsT = epsilon(1.0_dp)
+            !$omp parallel do default(shared) private(i,j) schedule(static)
+            do j = 1, wk%ny
+                do i = 1, wk%nx
+                    q(i,j) = min(max(wk%psi_out(i,j) / (wk%corfac(i,j) + epsT), par%q_min), par%q_max)
+                end do
+            end do
+            !$omp end parallel do
+        end if
+
+
+    end subroutine update_q_from_psi_out
+
+    subroutine update_face_fluxes(wk, mask, dx, dy, par)
+        ! face_fluxes_kernel!: net volume flux through every cell face [m3/s]
+        ! from psi_out and the outflow fractions (4-neighbour schemes).
+        ! Fx(a,j) is the flux through the face between (a-1,j) and (a,j),
+        ! positive in +x; Fy likewise in +y. With face dissipation, each cell
+        ! gets half the energy F*(phi_up - phi_down) of each of its faces
+        ! (true potential), divided by its area and L_w, into wk%diss. In a
+        ! periodic direction the two edge faces are the same face
+        ! (Fortran-only).
+        implicit none
+        type(k24_work_class), intent(INOUT) :: wk
+        real(dp),             intent(IN)    :: mask(:,:), dx, dy
+        type(k24_param_class),intent(IN)    :: par
+        integer  :: i, j, a, b, nx, ny, il, ir, jl, jr, im1, ip1, jm1, jp1
+        real(dp) :: f, P
+
+        nx = wk%nx; ny = wk%ny
+
+        !$omp parallel do default(shared) private(a,j,f,il,ir) schedule(static)
+        do j = 1, ny
+            do a = 1, nx+1
+                f  = 0.0_dp
+                il = a - 1
+                ir = a
+                if (par%periodic_x) then
+                    il = wrap_index(il, nx, .TRUE.)
+                    ir = wrap_index(ir, nx, .TRUE.)
+                end if
+                if (il >= 1) then
+                    if (mask(il,j) == 1.0_dp) f = f + wk%psi_out(il,j) * wk%w8(2,il,j)
+                end if
+                if (ir <= nx) then
+                    if (mask(ir,j) == 1.0_dp) f = f - wk%psi_out(ir,j) * wk%w8(1,ir,j)
+                end if
+                wk%Fx(a,j) = f
+            end do
+        end do
+        !$omp end parallel do
+
+        !$omp parallel do default(shared) private(i,b,f,jl,jr) schedule(static)
+        do b = 1, ny+1
+            do i = 1, nx
+                f  = 0.0_dp
+                jl = b - 1
+                jr = b
+                if (par%periodic_y) then
+                    jl = wrap_index(jl, ny, .TRUE.)
+                    jr = wrap_index(jr, ny, .TRUE.)
+                end if
+                if (jl >= 1) then
+                    if (mask(i,jl) == 1.0_dp) f = f + wk%psi_out(i,jl) * wk%w8(4,i,jl)
+                end if
+                if (jr <= ny) then
+                    if (mask(i,jr) == 1.0_dp) f = f - wk%psi_out(i,jr) * wk%w8(3,i,jr)
+                end if
+                wk%Fy(i,b) = f
+            end do
+        end do
+        !$omp end parallel do
+
+        if (.not. (par%dissipation_melt .and. par%diss_disc == K24_DISS_FACE)) return
+
+        !$omp parallel do default(shared) private(i,j,P,im1,ip1,jm1,jp1) schedule(static)
+        do j = 1, ny
+            do i = 1, nx
+                if (mask(i,j) /= 1.0_dp) then
+                    wk%diss(i,j) = 0.0_dp
+                    cycle
+                end if
+                im1 = wrap_index(i-1, nx, par%periodic_x); ip1 = wrap_index(i+1, nx, par%periodic_x)
+                jm1 = wrap_index(j-1, ny, par%periodic_y); jp1 = wrap_index(j+1, ny, par%periodic_y)
+                P = 0.0_dp
+                if (im1 >= 1)  P = P + wk%Fx(i,j)   * (wk%phi0(im1,j) - wk%phi0(i,j))
+                if (ip1 <= nx) P = P + wk%Fx(i+1,j) * (wk%phi0(i,j)   - wk%phi0(ip1,j))
+                if (jm1 >= 1)  P = P + wk%Fy(i,j)   * (wk%phi0(i,jm1) - wk%phi0(i,j))
+                if (jp1 <= ny) P = P + wk%Fy(i,j+1) * (wk%phi0(i,j)   - wk%phi0(i,jp1))
+                wk%diss(i,j) = P / 2.0_dp / (dx * dy * par%latent_heat_water)
+            end do
+        end do
+        !$omp end parallel do
+
+    end subroutine update_face_fluxes
+
+    ! ============================================================
+    ! Flow routing: dispatcher + four implementations
+    ! ============================================================
+    ! All compute psi_out, the accumulated upstream outflow per cell [m3/s],
+    ! seeded with mdot_total*dx*dy/rho_w. Mirrors route_psi_out!.
     !
-    !   * RECURSIVE (default) -- depth-first with memoization. Fastest, but
-    !     recurses as deep as the longest flow chain, which on a real ice-sheet
-    !     grid can exhaust the process stack.
-    !   * ITERATIVE -- the same traversal with an explicit stack; no recursion
-    !     depth limit, reproduces RECURSIVE cell for cell (max_psi_out_calls
-    !     cutoff included).
-    !   * TOPOSORT -- Kahn's algorithm over the flow-direction graph, a genuine
-    !     single pass. Exact only if that graph is acyclic, which real
-    !     topography usually is not (confirmed on Thwaites-2km at every
-    !     longcoupwater). Errors on a detected cycle unless
-    !     k24_toposort_allow_cycles is set.
+    !   * TAPED (default) -- the recursion's traversal recorded once per
+    !     calc_k24 call (it depends only on the mask and the routing
+    !     weights) and replayed every sweep. Bit-identical to RECURSIVE for
+    !     GDS_WARNER; the only algorithm for the other routing schemes.
+    !   * RECURSIVE -- depth-first with memoization (GDS_WARNER).
+    !   * ITERATIVE -- the same traversal with an explicit stack.
+    !   * TOPOSORT -- Kahn's algorithm; exact only on an acyclic graph.
     !
-    ! At a domain edge the out-of-range neighbour is skipped (water crossing
-    ! the edge leaves the domain); in a periodic direction the neighbour index
-    ! wraps to the opposite edge instead.
+    ! At a domain edge the out-of-range neighbour is skipped; in a periodic
+    ! direction the neighbour index wraps instead.
     subroutine update_psi_out(wk, mask, dx, dy, par)
         implicit none
         type(k24_work_class), intent(INOUT) :: wk
@@ -1440,6 +2311,9 @@ contains
         type(k24_param_class),intent(IN)    :: par
 
         select case (par%flux_solver)
+            case (K24_FLUX_TAPED)
+                if (.not. wk%tape_valid) call record_routing_tape(wk, mask, dx, dy, par)
+                call replay_routing_tape(wk, mask, dx, dy, par)
             case (K24_FLUX_RECURSIVE)
                 call update_psi_out_recursive(wk, mask, dx, dy, par)
             case (K24_FLUX_ITERATIVE)
@@ -1447,11 +2321,164 @@ contains
             case (K24_FLUX_TOPOSORT)
                 call update_psi_out_toposort(wk, mask, dx, dy, par)
             case default
-                write(*,*) "update_psi_out:: error: k24_flux_solver must be one of [0,1,2]."
+                write(*,*) "update_psi_out:: error: k24_flux_solver must be one of [0,1,2,3]."
                 write(*,*) "flux_solver = ", par%flux_solver
                 stop
         end select
     end subroutine update_psi_out
+
+    ! --- Taped (record once, replay every sweep) ------------------
+    subroutine record_routing_tape(wk, mask, dx, dy, par)
+        ! record_routing_tape_kernel! / record_routing_tape_weights_kernel!:
+        ! the explicit-stack traversal of update_psi_out_iterative, recording
+        ! only the operations. Op k is psi(dst) += psi(src)*w, or, when
+        ! src_i == 0, the clamp psi(dst) = max(0, psi(dst)). GDS_WARNER reads
+        ! the routing directions directly (routing_weight from the
+        ! neighbour's side); the other schemes read w8(opposite(d), n).
+        implicit none
+        type(k24_work_class), intent(INOUT) :: wk
+        real(dp),             intent(IN)    :: mask(:,:), dx, dy
+        type(k24_param_class),intent(IN)    :: par
+
+        integer  :: i, j, si, sj, sk, ni, nj, top, capacity, call_count, ndirs, done, n_ground, cap_ops
+        real(dp) :: w
+        logical  :: gds, hit_cap, inside
+
+        gds   = (par%routing_scheme == K24_ROUTE_GDS_WARNER)
+        ndirs = par%n_dirs
+        done  = ndirs + 1
+
+        n_ground = count(mask == 1.0_dp)
+        ! Each grounded cell folds in at most ndirs neighbours and is clamped once.
+        cap_ops = (ndirs + 1) * n_ground + 1
+        if (allocated(wk%t_dst_i)) deallocate(wk%t_dst_i, wk%t_dst_j, wk%t_src_i, wk%t_src_j, wk%t_w)
+        allocate(wk%t_dst_i(cap_ops), wk%t_dst_j(cap_ops), wk%t_src_i(cap_ops), wk%t_src_j(cap_ops), wk%t_w(cap_ops))
+        wk%tape_n = 0
+
+        wk%visited = 0
+        call_count = 0
+        hit_cap    = .FALSE.
+        capacity   = n_ground + 1
+        allocate(wk%stack_i(capacity), wk%stack_j(capacity), wk%stack_k(capacity))
+
+        do j = 1, wk%ny
+            do i = 1, wk%nx
+
+                if (mask(i,j) /= 1.0_dp) cycle
+                if (wk%visited(i,j) == 1) cycle
+
+                top = 1
+                wk%stack_i(1) = i; wk%stack_j(1) = j; wk%stack_k(1) = 0
+
+                do while (top > 0)
+
+                    si = wk%stack_i(top); sj = wk%stack_j(top); sk = wk%stack_k(top)
+
+                    if (sk == 0) then
+
+                        wk%visited(si,sj) = 1
+                        call_count = call_count + 1
+                        if (call_count > par%max_psi_out_calls) then
+                            hit_cap = .TRUE.
+                            call push_tape_op(wk, si, sj, 0, 0, 0.0_dp)
+                            top = top - 1
+                        else
+                            wk%stack_k(top) = 1
+                        end if
+
+                    else if (sk < done) then
+
+                        ! Overwritten below if the neighbour must be resolved first.
+                        wk%stack_k(top) = sk + 1
+
+                        call neighbour(si, sj, sk, wk%nx, wk%ny, par, ni, nj, inside)
+                        if (.not. inside) cycle
+
+                        if (gds) then
+                            w = routing_weight(wk%gsx(ni,nj), wk%gsy(ni,nj), -K24_DIRS(1,sk), -K24_DIRS(2,sk), dx, dy)
+                        else
+                            w = wk%w8(K24_OPPOSITE(sk), ni, nj)
+                        end if
+                        if (.not. (w > 0.0_dp .and. mask(ni,nj) == 1.0_dp)) cycle
+
+                        if (wk%visited(ni,nj) == 1) then
+                            call push_tape_op(wk, si, sj, ni, nj, w)
+                        else
+                            ! Resolve the neighbour first, then come back to this
+                            ! same neighbour (sk unchanged).
+                            wk%stack_k(top) = sk
+                            if (top >= capacity) then
+                                write(*,*) "record_routing_tape:: error: routing stack overflow."
+                                stop
+                            end if
+                            top = top + 1
+                            wk%stack_i(top) = ni; wk%stack_j(top) = nj; wk%stack_k(top) = 0
+                        end if
+
+                    else
+
+                        call push_tape_op(wk, si, sj, 0, 0, 0.0_dp)
+                        top = top - 1
+
+                    end if
+
+                end do
+
+            end do
+        end do
+
+        deallocate(wk%stack_i, wk%stack_j, wk%stack_k)
+
+        if (hit_cap) then
+            write(*,'(a,i0,a)') " k24: WARNING the taped routing hit k24_max_psi_out_calls = ", &
+                par%max_psi_out_calls, " cells in one sweep; cutting the flow routing off early." // &
+                " Raise k24_max_psi_out_calls if this grid genuinely has more grounded cells."
+        end if
+
+        wk%tape_valid = .TRUE.
+
+    end subroutine record_routing_tape
+
+    subroutine push_tape_op(wk, ci, cj, ni, nj, w)
+        implicit none
+        type(k24_work_class), intent(INOUT) :: wk
+        integer,  intent(IN) :: ci, cj, ni, nj
+        real(dp), intent(IN) :: w
+        wk%tape_n = wk%tape_n + 1
+        wk%t_dst_i(wk%tape_n) = ci; wk%t_dst_j(wk%tape_n) = cj
+        wk%t_src_i(wk%tape_n) = ni; wk%t_src_j(wk%tape_n) = nj
+        wk%t_w(wk%tape_n)     = w
+    end subroutine push_tape_op
+
+    subroutine replay_routing_tape(wk, mask, dx, dy, par)
+        ! replay_routing_tape!: every grounded cell's psi_out set to its own
+        ! source term, then the recorded operations applied in order.
+        implicit none
+        type(k24_work_class), intent(INOUT) :: wk
+        real(dp),             intent(IN)    :: mask(:,:), dx, dy
+        type(k24_param_class),intent(IN)    :: par
+        integer :: i, j, k, ci, cj, ni
+
+        ! DEVIATION 3: zeroed everywhere first.
+        wk%psi_out = 0.0_dp
+        !$omp parallel do default(shared) private(i,j) schedule(static)
+        do j = 1, wk%ny
+            do i = 1, wk%nx
+                if (mask(i,j) == 1.0_dp) wk%psi_out(i,j) = wk%mdot_total(i,j) * dx * dy / par%water_density
+            end do
+        end do
+        !$omp end parallel do
+
+        do k = 1, wk%tape_n
+            ci = wk%t_dst_i(k); cj = wk%t_dst_j(k); ni = wk%t_src_i(k)
+            if (ni == 0) then
+                wk%psi_out(ci,cj) = max(0.0_dp, wk%psi_out(ci,cj))
+            else
+                wk%psi_out(ci,cj) = wk%psi_out(ci,cj) + wk%psi_out(ni, wk%t_src_j(k)) * wk%t_w(k)
+            end if
+        end do
+
+    end subroutine replay_routing_tape
 
     ! --- Recursive (DFS + memoization) --------------------------
     subroutine update_psi_out_recursive(wk, mask, dx, dy, par)
@@ -1464,9 +2491,7 @@ contains
         logical  :: warned
         real(dp) :: dummy
 
-        ! DEVIATION: psi_out is zeroed everywhere. FastHydrology.jl's persists
-        ! between solves, so its non-grounded cells keep stale values; nothing
-        ! downstream reads them on either side.
+        ! DEVIATION 3: psi_out is zeroed everywhere.
         wk%psi_out = 0.0_dp
         wk%visited = 0
         call_count = 0
@@ -1483,10 +2508,9 @@ contains
 
     recursive function accumulate_psi_out(wk, i, j, mask, dx, dy, par, call_count, warned) result(psi_value)
         ! Mirrors accumulate_psi_out! (water_flux.jl). `call_count` caps the
-        ! number of cells one sweep may visit (KORI-ULB's funcnt <= 5e4 in
-        ! DpareaWarGds.m); once tripped the current cell is treated as a
-        ! terminal source and returned WITHOUT the trailing max(0, .) clamp,
-        ! exactly as the reference does.
+        ! number of cells one sweep may visit (KORI-ULB's funcnt <= 5e4); once
+        ! tripped the current cell is treated as a terminal source, clamped at
+        ! zero like the normal exit.
         implicit none
         type(k24_work_class), intent(INOUT) :: wk
         integer,              intent(IN)    :: i, j
@@ -1498,6 +2522,7 @@ contains
 
         integer  :: ni, nj, d
         real(dp) :: w
+        logical  :: inside
 
         if (mask(i,j) /= 1.0_dp) then
             psi_value = 0.0_dp
@@ -1510,7 +2535,7 @@ contains
         end if
 
         wk%visited(i,j) = 1
-        wk%psi_out(i,j) = wk%mdot_total(i,j) * dx * dy
+        wk%psi_out(i,j) = wk%mdot_total(i,j) * dx * dy / par%water_density
 
         call_count = call_count + 1
         if (call_count > par%max_psi_out_calls) then
@@ -1520,17 +2545,16 @@ contains
                     " Raise k24_max_psi_out_calls if this grid genuinely has more grounded cells."
                 warned = .TRUE.
             end if
+            wk%psi_out(i,j) = max(0.0_dp, wk%psi_out(i,j))
             psi_value = wk%psi_out(i,j)
             return
         end if
 
         do d = 1, 4
-            ni = wrap_index(i + K24_DIRS(1,d), wk%nx, par%periodic_x)
-            nj = wrap_index(j + K24_DIRS(2,d), wk%ny, par%periodic_y)
-            if (ni < 1 .or. ni > wk%nx .or. nj < 1 .or. nj > wk%ny) cycle
+            call neighbour(i, j, d, wk%nx, wk%ny, par, ni, nj, inside)
+            if (.not. inside) cycle
 
-            w = -(wk%gsx(ni,nj) * real(K24_DIRS(1,d), dp) + &
-                  wk%gsy(ni,nj) * real(K24_DIRS(2,d), dp)) / (wk%abs_gs(ni,nj) + 1.0e-15_dp)
+            w = routing_weight(wk%gsx(ni,nj), wk%gsy(ni,nj), -K24_DIRS(1,d), -K24_DIRS(2,d), dx, dy)
 
             if (w > 0.0_dp) then
                 wk%psi_out(i,j) = wk%psi_out(i,j) + &
@@ -1538,7 +2562,7 @@ contains
             end if
         end do
 
-        ! If mdot is negative enough that all the flux refreezes, floor at zero.
+        ! If the source is negative enough that all the flux refreezes, floor at zero.
         wk%psi_out(i,j) = max(0.0_dp, wk%psi_out(i,j))
         psi_value = wk%psi_out(i,j)
 
@@ -1547,11 +2571,10 @@ contains
     ! --- Iterative (explicit stack, same traversal) --------------
     subroutine update_psi_out_iterative(wk, mask, dx, dy, par)
         ! Mirrors update_psi_out_iterative! (water_flux.jl). Stack entry
-        ! (i, j, k): k == 0 means unvisited; 1 <= k <= 4 means neighbours
-        ! 1..k-1 are folded in and k is next; k == 5 means finalize. A
-        ! not-yet-visited neighbour is pushed WITHOUT advancing k, so the
-        ! parent frame is re-entered and takes the "already visited" branch --
-        ! the explicit form of a return value flowing back to a paused caller.
+        ! (i, j, k): k == 0 unvisited; 1 <= k <= 4 neighbours 1..k-1 folded in,
+        ! k next; k == 5 finalize. A not-yet-visited neighbour is pushed
+        ! WITHOUT advancing k, so the parent frame is re-entered and takes the
+        ! "already visited" branch.
         implicit none
         type(k24_work_class), intent(INOUT) :: wk
         real(dp),             intent(IN)    :: mask(:,:), dx, dy
@@ -1559,17 +2582,13 @@ contains
 
         integer :: i, j, si, sj, sk, ni, nj, d, top, capacity, call_count
         real(dp) :: w
-        logical  :: warned
+        logical  :: warned, inside
 
         wk%psi_out = 0.0_dp
         wk%visited = 0
         call_count = 0
         warned     = .FALSE.
 
-        ! Every cell is pushed at most once (a push is guarded by
-        ! visited /= 1, and the cell is marked visited the moment it is first
-        ! examined at the top of the loop), so the grounded-cell count plus one
-        ! is a hard bound on the stack depth.
         capacity = count(mask == 1.0_dp) + 1
         allocate(wk%stack_i(capacity), wk%stack_j(capacity), wk%stack_k(capacity))
         top = 0
@@ -1590,7 +2609,7 @@ contains
                     if (sk == 0) then
 
                         wk%visited(si,sj) = 1
-                        wk%psi_out(si,sj) = wk%mdot_total(si,sj) * dx * dy
+                        wk%psi_out(si,sj) = wk%mdot_total(si,sj) * dx * dy / par%water_density
 
                         call_count = call_count + 1
                         if (call_count > par%max_psi_out_calls) then
@@ -1599,10 +2618,8 @@ contains
                                     par%max_psi_out_calls, " cells in one sweep; cutting the flow routing off early."
                                 warned = .TRUE.
                             end if
-                            ! Pop WITHOUT clamping, matching the recursive
-                            ! form's cap-trip branch, which returns before its
-                            ! trailing max(0, .). A cut-off cell with a
-                            ! negative local source therefore stays negative.
+                            ! Clamp before popping, matching the recursive cap-trip.
+                            wk%psi_out(si,sj) = max(0.0_dp, wk%psi_out(si,sj))
                             top = top - 1
                         else
                             wk%stack_k(top) = 1
@@ -1610,26 +2627,21 @@ contains
 
                     else if (sk <= 4) then
 
-                        d  = sk
-                        ni = wrap_index(si + K24_DIRS(1,d), wk%nx, par%periodic_x)
-                        nj = wrap_index(sj + K24_DIRS(2,d), wk%ny, par%periodic_y)
+                        d = sk
+                        call neighbour(si, sj, d, wk%nx, wk%ny, par, ni, nj, inside)
 
-                        if (ni < 1 .or. ni > wk%nx .or. nj < 1 .or. nj > wk%ny) then
+                        if (.not. inside) then
                             wk%stack_k(top) = sk + 1
                             cycle
                         end if
 
-                        w = -(wk%gsx(ni,nj) * real(K24_DIRS(1,d), dp) + &
-                              wk%gsy(ni,nj) * real(K24_DIRS(2,d), dp)) / (wk%abs_gs(ni,nj) + 1.0e-15_dp)
+                        w = routing_weight(wk%gsx(ni,nj), wk%gsy(ni,nj), -K24_DIRS(1,d), -K24_DIRS(2,d), dx, dy)
 
                         if (w <= 0.0_dp) then
                             wk%stack_k(top) = sk + 1
                             cycle
                         end if
 
-                        ! A non-grounded neighbour contributes 0, matching the
-                        ! recursive form's mask check (which only runs once
-                        ! w > 0 has already sent us into the call).
                         if (mask(ni,nj) /= 1.0_dp) then
                             wk%stack_k(top) = sk + 1
                             cycle
@@ -1666,10 +2678,8 @@ contains
     ! --- Topological sort (Kahn's algorithm, single pass) --------
     subroutine update_psi_out_toposort(wk, mask, dx, dy, par)
         ! Mirrors update_psi_out_topological! (water_flux.jl). The edge test is
-        ! evaluated from the SOURCE cell's own gradient -- w = (gs(A).d)/|gs(A)|
-        ! for the edge A -> A+d -- which is algebraically the same test the
-        ! recursive form applies from the receiving side, just rearranged so a
-        ! cell's outgoing edges can be built from its own data in one pass.
+        ! evaluated from the SOURCE cell's own direction, routing_weight(gs(A),
+        ! d) for the edge A -> A+d.
         implicit none
         type(k24_work_class), intent(INOUT) :: wk
         real(dp),             intent(IN)    :: mask(:,:), dx, dy
@@ -1678,29 +2688,25 @@ contains
         integer :: i, j, ni, nj, d, head, tail, capacity
         integer :: total_masked, processed, n_stuck
         real(dp) :: w
+        logical  :: inside
 
-        wk%psi_out = 0.0_dp   ! accumulated via += below, so must start clean
+        wk%psi_out = 0.0_dp
 
         allocate(wk%in_degree(wk%nx, wk%ny))
         wk%in_degree = 0
 
         total_masked = count(mask == 1.0_dp)
 
-        ! In-degree: how many grounded neighbours flow into each grounded cell.
-        !$omp parallel do default(shared) private(i,j,d,ni,nj,w) schedule(static)
+        !$omp parallel do default(shared) private(i,j,d,ni,nj,w,inside) schedule(static)
         do j = 1, wk%ny
             do i = 1, wk%nx
                 if (mask(i,j) /= 1.0_dp) cycle
                 do d = 1, 4
-                    ni = wrap_index(i + K24_DIRS(1,d), wk%nx, par%periodic_x)
-                    nj = wrap_index(j + K24_DIRS(2,d), wk%ny, par%periodic_y)
-                    if (ni < 1 .or. ni > wk%nx .or. nj < 1 .or. nj > wk%ny) cycle
+                    call neighbour(i, j, d, wk%nx, wk%ny, par, ni, nj, inside)
+                    if (.not. inside) cycle
                     if (mask(ni,nj) /= 1.0_dp) cycle
-
                     ! Edge (ni,nj) -> (i,j) exists iff (ni,nj) flows toward us.
-                    w = (wk%gsx(ni,nj) * real(-K24_DIRS(1,d), dp) + &
-                         wk%gsy(ni,nj) * real(-K24_DIRS(2,d), dp)) / (wk%abs_gs(ni,nj) + 1.0e-15_dp)
-
+                    w = routing_weight(wk%gsx(ni,nj), wk%gsy(ni,nj), -K24_DIRS(1,d), -K24_DIRS(2,d), dx, dy)
                     if (w > 0.0_dp) wk%in_degree(i,j) = wk%in_degree(i,j) + 1
                 end do
             end do
@@ -1730,19 +2736,14 @@ contains
             head = head + 1
             processed = processed + 1
 
-            ! Every upstream contribution is already folded in by construction
-            ! (this cell only reached the queue once all of them were final),
-            ! so all that is left is its own source term and the clamp.
-            wk%psi_out(i,j) = max(0.0_dp, wk%psi_out(i,j) + wk%mdot_total(i,j) * dx * dy)
+            wk%psi_out(i,j) = max(0.0_dp, wk%psi_out(i,j) + wk%mdot_total(i,j) * dx * dy / par%water_density)
 
             do d = 1, 4
-                ni = wrap_index(i + K24_DIRS(1,d), wk%nx, par%periodic_x)
-                nj = wrap_index(j + K24_DIRS(2,d), wk%ny, par%periodic_y)
-                if (ni < 1 .or. ni > wk%nx .or. nj < 1 .or. nj > wk%ny) cycle
+                call neighbour(i, j, d, wk%nx, wk%ny, par, ni, nj, inside)
+                if (.not. inside) cycle
                 if (mask(ni,nj) /= 1.0_dp) cycle
 
-                w = (wk%gsx(i,j) * real(K24_DIRS(1,d), dp) + &
-                     wk%gsy(i,j) * real(K24_DIRS(2,d), dp)) / (wk%abs_gs(i,j) + 1.0e-15_dp)
+                w = routing_weight(wk%gsx(i,j), wk%gsy(i,j), K24_DIRS(1,d), K24_DIRS(2,d), dx, dy)
 
                 if (w > 0.0_dp) then
                     wk%psi_out(ni,nj) = wk%psi_out(ni,nj) + wk%psi_out(i,j) * w
@@ -1766,8 +2767,8 @@ contains
             else
                 write(*,'(a,i0,a,i0,a)') " update_psi_out_toposort:: error: cycle in the flow-direction graph -- ", &
                     n_stuck, " of ", total_masked, " grounded cell(s) never reached in-degree zero."
-                write(*,*) "Expect this on real topography at any k24_long_coupling_water."
-                write(*,*) "Use k24_flux_solver = 0 (recursive) or 1 (iterative), or set k24_toposort_allow_cycles = .TRUE."
+                write(*,*) "Expect this on real topography at any k24_coupling_length_kamb86."
+                write(*,*) "Use k24_flux_solver = 3 (taped), 0 (recursive) or 1 (iterative), or set k24_toposort_allow_cycles = .TRUE."
                 stop
             end if
         end if
@@ -1779,128 +2780,34 @@ contains
     ! ============================================================
     ! Effective pressure
     ! ============================================================
-    subroutine update_N(N, q, wk, uxy_b, A_glen, kappa, H_ice, par)
-        ! Mirrors update_N! (effective_pressure.jl): Q, S_inf, H, Po, N_inf,
-        ! then the complementary-error-function transition to N.
+    subroutine update_N(N, q, wk, mask, uxy_b, A_glen, kappa, H_ice, par)
+        ! Mirrors update_N! (effective_pressure.jl), the fused grounded-only
+        ! pass: Po = rho_i*g*H everywhere; on grounded cells Q, S_inf, H,
+        ! N_inf and N, each evaluated in the same order as Julia; every other
+        ! cell gets N = 0 and zero conduit fields. abs_g and phi0 are those of
+        ! the TRUE potential.
         implicit none
         real(dp),             intent(INOUT) :: N(:,:)
-        real(dp),             intent(IN)    :: q(:,:)
+        real(dp),             intent(IN)    :: q(:,:), mask(:,:)
         type(k24_work_class), intent(INOUT) :: wk
         real(dp),             intent(IN)    :: uxy_b(:,:), A_glen(:,:), kappa(:,:), H_ice(:,:)
         type(k24_param_class),intent(IN)    :: par
 
         integer  :: i, j, nx, ny
-        real(dp) :: alpha, beta, n_glen, K, sqrt_pi
-        real(dp) :: Q_c, expo, ratio, numer, denom_const, arg
-        real(dp) :: sliding_coeff, melt_coeff
+        real(dp) :: K_fac, grad_exp, Q_exp, denom_const, inv_n, sqrt_pi
+        real(dp) :: sliding_coeff, melt_coeff, Q_c
+        real(dp) :: Po_ij, Q_ij, S_ij, Hh, Hs, H_ij, Ninf_ij, expo, k
 
         nx = wk%nx; ny = wk%ny
-        alpha  = par%manning_coefficient_exponent
-        beta   = par%bed_friction_exponent
-        n_glen = par%manning_exponent
-        K      = par%K
 
-        ! ---- Q: volumetric flux per conduit ----
-        !$omp parallel do default(shared) private(i,j) schedule(static)
-        do j = 1, ny
-            do i = 1, nx
-                wk%Q(i,j) = q(i,j) * par%coupling_length
-            end do
-        end do
-        !$omp end parallel do
+        K_fac       = par%K**(-1.0_dp / par%manning_coefficient_exponent)
+        grad_exp    = (1.0_dp - par%bed_friction_exponent) / par%manning_coefficient_exponent
+        Q_exp       = 1.0_dp / par%manning_coefficient_exponent
+        denom_const = 2.0_dp * par%manning_exponent**(-par%manning_exponent) * par%ice_density * par%latent_heat_water
+        inv_n       = 1.0_dp / par%manning_exponent
+        sqrt_pi     = sqrt(K24_PI)
+        Q_c         = par%critical_discharge
 
-        ! ---- S_inf: far-field conduit cross-section ----
-        ! DEVIATION: Julia evaluates the formula everywhere and then overwrites
-        ! Q == 0 cells with 0 (its own comment notes that those cells otherwise
-        ! give 0^negative * 0^positive = Inf*0 = NaN). The branch here takes
-        ! the same limit without relying on Inf/NaN surviving -Ofast.
-        !$omp parallel do default(shared) private(i,j) schedule(static)
-        do j = 1, ny
-            do i = 1, nx
-                if (wk%Q(i,j) == 0.0_dp) then
-                    wk%S_inf(i,j) = 0.0_dp
-                else
-                    wk%S_inf(i,j) = K**(-1.0_dp/alpha) &
-                                  * wk%abs_g(i,j)**((1.0_dp - beta)/alpha) &
-                                  * wk%Q(i,j)**(1.0_dp/alpha)
-                end if
-            end do
-        end do
-        !$omp end parallel do
-
-        ! ---- H: conduit thickness ----
-        ! Q_c is chosen by the drainage mode (AbstractDrainageMode): the
-        ! configured value for BOTH, the exp(-Q/Q_c) -> 0 limit for EFFICIENT,
-        ! the exp(-Q/Q_c) -> 1 limit for INEFFICIENT. Taking the two limits
-        ! analytically avoids dividing by zero / by huge().
-        Q_c = par%critical_discharge
-
-        !$omp parallel do default(shared) private(i,j,expo) schedule(static)
-        do j = 1, ny
-            do i = 1, nx
-
-                wk%H_hard(i,j) = sqrt(wk%S_inf(i,j))
-
-                select case (par%drainage_mode)
-
-                    case (K24_DRAINAGE_INEFFICIENT)
-                        expo = 1.0_dp
-
-                    case (K24_DRAINAGE_EFFICIENT)
-                        ! Q_c -> 0: exp(-Q/Q_c) -> 0 for Q > 0. At Q == 0 the
-                        ! ratio is 0/0; Julia special-cases it to H_soft = 0,
-                        ! which is also the sqrt(S_inf)/F_till limit there
-                        ! since S_inf == 0 whenever Q == 0.
-                        if (wk%Q(i,j) == 0.0_dp) then
-                            wk%H_soft(i,j)  = 0.0_dp
-                            wk%H_cond(i,j)  = (1.0_dp - kappa(i,j)) * wk%H_hard(i,j)
-                            cycle
-                        end if
-                        expo = 0.0_dp
-
-                    case default   ! K24_DRAINAGE_BOTH
-                        if (Q_c == 0.0_dp) then
-                            if (wk%Q(i,j) == 0.0_dp) then
-                                wk%H_soft(i,j) = 0.0_dp
-                                wk%H_cond(i,j) = (1.0_dp - kappa(i,j)) * wk%H_hard(i,j)
-                                cycle
-                            end if
-                            expo = 0.0_dp
-                        else
-                            expo = exp(-wk%Q(i,j) / Q_c)
-                        end if
-
-                end select
-
-                wk%H_soft(i,j) = max(0.0_dp, par%initial_cavity_height &
-                    + (wk%H_hard(i,j) / par%till_factor - par%initial_cavity_height) * expo)
-
-                wk%H_cond(i,j) = (1.0_dp - kappa(i,j)) * wk%H_hard(i,j) &
-                               + kappa(i,j) * wk%H_soft(i,j)
-
-            end do
-        end do
-        !$omp end parallel do
-
-        ! ---- Po: ice overburden pressure ----
-        ! From the RAW ice thickness, not the potential-filled h: update_Po!
-        ! reads state.h, which potential_filling! deliberately leaves alone
-        ! (it writes its correction into model.h instead).
-        !$omp parallel do default(shared) private(i,j) schedule(static)
-        do j = 1, ny
-            do i = 1, nx
-                wk%Po(i,j) = par%ice_density * par%gravity * H_ice(i,j)
-            end do
-        end do
-        !$omp end parallel do
-
-        ! ---- N_inf: far-field effective pressure ----
-        denom_const = 2.0_dp * n_glen**(-n_glen) * par%ice_density * par%latent_heat_water
-
-        ! The drainage mode gates Eq. (5b)'s two opening terms as well as
-        ! update_H's Q_c (opening_coefficients in effective_pressure.jl):
-        ! EFFICIENT drops the sliding-over-obstacles term, INEFFICIENT drops
-        ! the melt-driven one, BOTH keeps them both.
         select case (par%drainage_mode)
             case (K24_DRAINAGE_EFFICIENT)
                 sliding_coeff = 0.0_dp
@@ -1913,45 +2820,77 @@ contains
                 melt_coeff    = 1.0_dp
         end select
 
-        !$omp parallel do default(shared) private(i,j,ratio,numer) schedule(static)
+        !$omp parallel do default(shared) private(i,j,Po_ij,Q_ij,S_ij,Hh,Hs,H_ij,Ninf_ij,expo,k) schedule(static)
         do j = 1, ny
             do i = 1, nx
-                ! DEVIATION: branch instead of computing H^2/S_inf^2 with
-                ! S_inf == 0 and overwriting afterwards, as Julia does.
-                if (wk%S_inf(i,j) == 0.0_dp) then
-                    wk%N_inf(i,j) = wk%Po(i,j)
+
+                ! From the RAW ice thickness, not the potential-filled h.
+                Po_ij = par%ice_density * par%gravity * H_ice(i,j)
+                wk%Po(i,j) = Po_ij
+
+                if (mask(i,j) /= 1.0_dp) then
+                    wk%Q(i,j) = 0.0_dp; wk%S_inf(i,j) = 0.0_dp
+                    wk%H_hard(i,j) = 0.0_dp; wk%H_soft(i,j) = 0.0_dp; wk%H_cond(i,j) = 0.0_dp
+                    wk%N_inf(i,j) = 0.0_dp; N(i,j) = 0.0_dp
                     cycle
                 end if
 
-                ratio = wk%H_cond(i,j) / wk%S_inf(i,j)
-                numer = sliding_coeff * par%ice_density * par%latent_heat_water &
-                                      * uxy_b(i,j) * par%bed_thickness &
-                      + melt_coeff * wk%Q(i,j) * wk%abs_g(i,j)
+                Q_ij = q(i,j) * par%coupling_length
 
-                wk%N_inf(i,j) = min(max( &
-                    (ratio * ratio * numer / (denom_const * A_glen(i,j)))**(1.0_dp/n_glen), &
-                    par%min_pressure_fraction * wk%Po(i,j)), wk%Po(i,j))
-            end do
-        end do
-        !$omp end parallel do
-
-        ! ---- N ----
-        sqrt_pi = sqrt(K24_PI)
-        !$omp parallel do default(shared) private(i,j,arg) schedule(static)
-        do j = 1, ny
-            do i = 1, nx
-                ! N_inf == 0 (reachable once min_pressure_fraction is 0, the
-                ! default, and Po's own floor is gone -- flat h == b == 0
-                ! cells now get Po == 0 too) makes the erf argument diverge:
-                ! Inf, or 0/0 -> NaN in the doubly-degenerate phi0 == 0 case.
-                ! Julia guards this the same way (overwrite_where! on N_inf
-                ! == 0 after the fact); this branch is the equivalent here.
-                if (wk%N_inf(i,j) > 0.0_dp) then
-                    arg    = sqrt_pi * wk%phi0(i,j) / (2.0_dp * wk%N_inf(i,j))
-                    N(i,j) = max(0.0_dp, erf(arg) * wk%N_inf(i,j))
+                ! DEVIATION 1: zero flux means zero conduit cross-section.
+                if (Q_ij == 0.0_dp) then
+                    S_ij = 0.0_dp
                 else
-                    N(i,j) = 0.0_dp
+                    S_ij = K_fac * wk%abs_g(i,j)**grad_exp * Q_ij**Q_exp
                 end if
+
+                ! Q_c per drainage mode: the configured value (BOTH), the
+                ! exp(-Q/Q_c) -> 0 limit (EFFICIENT, Q_c -> 0) or -> 1 limit
+                ! (INEFFICIENT, Q_c -> Inf), taken analytically. The
+                ! Q_c == 0, Q == 0 case is the 0/0 limit, H_soft = 0.
+                Hh = sqrt(S_ij)
+                select case (par%drainage_mode)
+                    case (K24_DRAINAGE_INEFFICIENT)
+                        expo = 1.0_dp
+                    case (K24_DRAINAGE_EFFICIENT)
+                        expo = 0.0_dp
+                    case default
+                        if (Q_c == 0.0_dp) then
+                            expo = 0.0_dp
+                        else
+                            expo = exp(-Q_ij / Q_c)
+                        end if
+                end select
+                Hs = max(0.0_dp, par%initial_cavity_height &
+                     + (sqrt(S_ij) / par%till_factor - par%initial_cavity_height) * expo)
+                if (Q_ij == 0.0_dp .and. (par%drainage_mode == K24_DRAINAGE_EFFICIENT .or. &
+                    (par%drainage_mode == K24_DRAINAGE_BOTH .and. Q_c == 0.0_dp))) then
+                    Hs = 0.0_dp
+                end if
+                k = kappa(i,j)
+                H_ij = (1.0_dp - k) * Hh + k * Hs
+
+                ! DEVIATION 1: S_inf == 0 gives N_inf = Po.
+                if (S_ij == 0.0_dp) then
+                    Ninf_ij = Po_ij
+                else
+                    Ninf_ij = min(max( &
+                        ((H_ij * H_ij) / (S_ij * S_ij) * (sliding_coeff * par%ice_density * par%latent_heat_water &
+                            * uxy_b(i,j) * par%bed_thickness + melt_coeff * Q_ij * wk%abs_g(i,j)) &
+                         / (denom_const * A_glen(i,j)))**inv_n, &
+                        par%min_pressure_fraction * Po_ij), Po_ij)
+                end if
+
+                ! DEVIATION 1: N_inf == 0 gives N = 0.
+                if (Ninf_ij == 0.0_dp) then
+                    N(i,j) = 0.0_dp
+                else
+                    N(i,j) = max(0.0_dp, erf(sqrt_pi * wk%phi0(i,j) / (2.0_dp * Ninf_ij)) * Ninf_ij)
+                end if
+
+                wk%Q(i,j) = Q_ij; wk%S_inf(i,j) = S_ij; wk%H_hard(i,j) = Hh; wk%H_soft(i,j) = Hs
+                wk%H_cond(i,j) = H_ij; wk%N_inf(i,j) = Ninf_ij
+
             end do
         end do
         !$omp end parallel do
@@ -1980,9 +2919,6 @@ contains
         select case (par%water_thickness_algorithm)
 
             case (K24_WTHICK_AREAL_CONDUIT)
-                ! S_inf / l_c: the conduit cross-section smeared over the
-                ! inter-conduit spacing. Deliberately unclamped -- the
-                ! [W_min, W_max] bounds were chosen for a thin sheet.
                 !$omp parallel do default(shared) private(i,j) schedule(static)
                 do j = 1, ny
                     do i = 1, nx
@@ -1992,17 +2928,14 @@ contains
                 !$omp end parallel do
 
             case (K24_WTHICK_DARCY_WEISBACH)
-                ! Turbulent parallel-plate inversion for a wide slot,
-                ! d = (f*rho_w*q^2 / (4*|grad phi0|))^(1/3), using the
-                ! UNSMOOTHED gradient. f is the same Darcy-Weisbach friction
-                ! factor that K folds into S_inf -- one parameter, not two.
+                ! d = (f*rho_w*q^2 / (4*|grad phi0|))^(1/3), true potential.
                 if (par%gradient_convention == K24_GRAD_MEAN) then
                     g_mean = masked_mean(wk%abs_g, mask)
                     !$omp parallel do default(shared) private(i,j,num) schedule(static)
                     do j = 1, ny
                         do i = 1, nx
                             num = par%friction_factor * par%water_density * q(i,j) * q(i,j) &
-                                / (4.0_dp * g_mean + 1.0e-15_dp)
+                                / (4.0_dp * g_mean + epsilon(1.0_dp))
                             W(i,j) = min(par%W_max, max(par%W_min, num**third))
                         end do
                     end do
@@ -2012,7 +2945,7 @@ contains
                     do j = 1, ny
                         do i = 1, nx
                             num = par%friction_factor * par%water_density * q(i,j) * q(i,j) &
-                                / (4.0_dp * wk%abs_g(i,j) + 1.0e-15_dp)
+                                / (4.0_dp * wk%abs_g(i,j) + epsilon(1.0_dp))
                             W(i,j) = min(par%W_max, max(par%W_min, num**third))
                         end do
                     end do
@@ -2020,15 +2953,10 @@ contains
                 end if
 
             case (K24_WTHICK_LAMINAR)
-                ! Le Brocq / Weertman laminar inversion (Eq. 8, Kazmierczak et
-                ! al 2022), d = (12*eta_w*q / |grad phi0_s|)^(1/3), using the
-                ! SMOOTHED gradient.
+                ! d = (12*eta_w*q / |grad phi0_s|)^(1/3), routing directions.
                 if (par%gradient_convention == K24_GRAD_MEAN) then
-                    ! Matches Kori-ULB's mean(gdsmag(...)) in SubWaterFlux.m.
-                    ! Julia adds no 1e-15 guard in this one branch (unlike the
-                    ! local variant and both Darcy-Weisbach ones); the max()
-                    ! below keeps a zero-mean domain from producing a negative
-                    ! or NaN W rather than reproducing an infinity.
+                    ! Julia adds no eps guard in this branch; the max() below
+                    ! keeps a zero-mean domain finite.
                     g_mean = masked_mean(wk%abs_gs, mask)
                     if (g_mean <= 0.0_dp) then
                         W = min(par%W_max, max(par%W_min, 0.0_dp))
@@ -2046,7 +2974,7 @@ contains
                     !$omp parallel do default(shared) private(i,j,num) schedule(static)
                     do j = 1, ny
                         do i = 1, nx
-                            num = 12.0_dp * par%eta_w * q(i,j) / (wk%abs_gs(i,j) + 1.0e-15_dp)
+                            num = 12.0_dp * par%eta_w * q(i,j) / (wk%abs_gs(i,j) + epsilon(1.0_dp))
                             W(i,j) = min(par%W_max, max(par%W_min, num**third))
                         end do
                     end do

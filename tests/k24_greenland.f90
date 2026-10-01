@@ -29,7 +29,7 @@ program k24_compare
     real(wp_local), allocatable :: H_ice(:,:), z_bed(:,:), z_sl(:,:)
     real(wp_local), allocatable :: f_ice(:,:), f_grnd(:,:), mask(:,:)
     real(wp_local), allocatable :: bmb_grnd(:,:), uxy_b(:,:), A_glen(:,:)
-    real(wp_local), allocatable :: mdot(:,:)
+    real(wp_local), allocatable :: mdot(:,:), G(:,:), q_T(:,:), i_eb(:,:)
 
     type(hydro_class) :: hyd
     real(wp_local)    :: dx_km, dy_km
@@ -57,6 +57,7 @@ program k24_compare
     allocate(H_ice(nx,ny), z_bed(nx,ny), z_sl(nx,ny))
     allocate(f_ice(nx,ny), f_grnd(nx,ny), mask(nx,ny))
     allocate(bmb_grnd(nx,ny), uxy_b(nx,ny), A_glen(nx,ny), mdot(nx,ny))
+    allocate(G(nx,ny), q_T(nx,ny), i_eb(nx,ny))
 
     call nc_read(restart_file, "xc",       xc)
     call nc_read(restart_file, "yc",       yc)
@@ -71,6 +72,12 @@ program k24_compare
 
     ! Match greenland.jl's volume source rate exactly (see header).
     mdot = -bmb_grnd * mdot_scale
+
+    ! K24 builds its source from terms: the same melt, supplied as geothermal
+    ! heat G = mdot*rho_w*L_w [W/m2] (k24_greenland.jl does the same).
+    G    = mdot * 1000.0_wp_local * 3.34e5_wp_local
+    q_T  = 0.0_wp_local
+    i_eb = 0.0_wp_local
 
     where (f_grnd > 0.0_wp_local .and. f_ice > 0.0_wp_local)
         mask = 1.0_wp_local
@@ -91,10 +98,10 @@ program k24_compare
     write(*,'(a,i0,a,i0)') "  method_til = ", hyd%par%method_til, &
                            "  method_transport = ", hyd%par%method_transport
 
-    ! One step. Any dt > 0 works: with TIL_NONE the source is mdot and K24 is
-    ! purely diagnostic, so the result does not depend on dt.
+    ! One step. Any dt > 0 works: K24 is purely diagnostic, so the result
+    ! does not depend on dt.
     call hydro_update(hyd, H_ice, z_bed, z_sl, f_ice, f_grnd, mask, &
-                      mdot, uxy_b, A_glen, 1.0_wp_local)
+                      mdot, G, q_T, i_eb, uxy_b, A_glen, 1.0_wp_local)
 
     call nc_create(out_file)
     call nc_write_dim(out_file, "xc", x=xc, units="km")

@@ -45,6 +45,7 @@ program shmip
     real(wp_local), allocatable :: H_ice(:,:), z_bed(:,:), z_sl(:,:)
     real(wp_local), allocatable :: f_ice(:,:), f_grnd(:,:), mask(:,:)
     real(wp_local), allocatable :: mdot(:,:), uxy_b(:,:), A_glen(:,:)
+    real(wp_local), allocatable :: G_zero(:,:)
     real(wp_local), allocatable :: xc(:), yc(:)
 
     type(hydro_class) :: hyd
@@ -78,6 +79,11 @@ program shmip
     allocate(H_ice(nx,ny), z_bed(nx,ny), z_sl(nx,ny))
     allocate(f_ice(nx,ny), f_grnd(nx,ny), mask(nx,ny))
     allocate(mdot(nx,ny), uxy_b(nx,ny), A_glen(nx,ny))
+    ! SHMIP prescribes the water input itself (distributed melt and moulins),
+    ! not a basal heat budget: it is passed to K24 as i_eb with G = q_T = 0,
+    ! which routes exactly the same volume as the former mdot source.
+    allocate(G_zero(nx,ny))
+    G_zero = 0.0_wp_local
     allocate(xc(nx), yc(ny))
 
     call setup_case(shmip_case, nx, ny, H_ice, z_bed, xc, yc, cs)
@@ -118,7 +124,7 @@ program shmip
 
         call update_forcing(cs, time, mdot)
         call hydro_update(hyd, H_ice, z_bed, z_sl, f_ice, f_grnd, mask, &
-                          mdot, uxy_b, A_glen, time)
+                          mdot, G_zero, G_zero, mdot, uxy_b, A_glen, time)
 
         if (mod(real(n_step,wp_local)*dt_step, dt_out) < 0.5_wp_local*dt_step .or. time >= t_end) then
             i_out = i_out + 1
