@@ -603,7 +603,7 @@ contains
     ! ============================================================
     subroutine calc_k24(q_x, q_y, N, p_w, W, q, Q_b, Q_diss, &
                         H_ice, z_bed, mask, G, q_T, i_eb, uxy_b, A_glen, kappa, &
-                        dx, dy, par, ux_b, uy_b, tau_b_in, c_till_in, diss_io, &
+                        dx, dy, par, ux_b, uy_b, tau_b_in, c_till_in, diss_io, C_frz, &
                         gsx_out, gsy_out, absgs_out, absg_out, phi0_out)
         ! Mirrors update_steady_state! (FastHydrology.jl/.../run.jl):
         ! update_q, then update_N, then update_W.
@@ -617,6 +617,13 @@ contains
         ! Water source terms (see the module header): G, q_T [W/m2] and i_eb
         ! [kg/m2/s]. Q_b and Q_diss [W/m2] are returned as used in the last
         ! Picard sweep.
+        !
+        ! `C_frz` (optional, [m/s ice equivalent]) is the freeze-on capacity
+        ! for the host's capacity basal boundary condition: the water routed
+        ! into each grounded cell from upstream, rho_w*Psi_in/(rho_i*dx*dy),
+        ! from the final routing. The cell's own source (melt, dissipation,
+        ! i_eb) is not in it: the host counts that heat in its demand.
+        ! Fortran-only for now.
         !
         ! Optional inputs needed by some options only:
         !   ux_b, uy_b : C-grid basal velocities [m/s] (acx: face between i and
@@ -650,6 +657,7 @@ contains
         type(k24_param_class), intent(IN) :: par
         real(dp), intent(IN),    optional :: ux_b(:,:), uy_b(:,:), tau_b_in(:,:), c_till_in(:,:)
         real(dp), intent(INOUT), optional :: diss_io(:,:)
+        real(dp), intent(OUT),   optional :: C_frz(:,:)
         real(dp), intent(OUT),   optional :: gsx_out(:,:), gsy_out(:,:), absgs_out(:,:)
         real(dp), intent(OUT),   optional :: absg_out(:,:), phi0_out(:,:)
 
@@ -748,6 +756,14 @@ contains
         end do
         !$omp end parallel do
 
+        if (present(C_frz)) then
+            ! GDS-Warner routes with weights computed on the fly, so w8 is
+            ! only filled when face fluxes need it.
+            if (par%routing_scheme == K24_ROUTE_GDS_WARNER .and. .not. needs_face_fluxes(par)) &
+                call compute_routing_weights(wk, mask, dx, dy, par)
+            call calc_capacity(C_frz, wk, mask, dx, dy, par)
+        end if
+
         if (present(gsx_out))   gsx_out   = wk%gsx
         if (present(gsy_out))   gsy_out   = wk%gsy
         if (present(absgs_out)) absgs_out = wk%abs_gs
@@ -759,6 +775,40 @@ contains
         return
 
     end subroutine calc_k24
+
+    subroutine calc_capacity(C_frz, wk, mask, dx, dy, par)
+        ! Freeze-on capacity [m/s ice equivalent] of each grounded cell: the
+        ! inflow Psi_in = sum over neighbours n of psi_out(n) times the
+        ! fraction of its outflow sent toward the cell,
+        ! C = rho_w*Psi_in/(rho_i*dx*dy).
+        implicit none
+        real(dp),             intent(OUT) :: C_frz(:,:)
+        type(k24_work_class), intent(IN)  :: wk
+        real(dp),             intent(IN)  :: mask(:,:), dx, dy
+        type(k24_param_class),intent(IN)  :: par
+        integer  :: i, j, d, ni, nj
+        real(dp) :: psi_in
+
+        !$omp parallel do default(shared) private(i,j,d,ni,nj,psi_in) schedule(static)
+        do j = 1, wk%ny
+            do i = 1, wk%nx
+                psi_in = 0.0_dp
+                if (mask(i,j) == 1.0_dp) then
+                    do d = 1, par%n_dirs
+                        ni = wrap_index(i + K24_DIRS(1,d), wk%nx, par%periodic_x)
+                        nj = wrap_index(j + K24_DIRS(2,d), wk%ny, par%periodic_y)
+                        if (ni < 1 .or. ni > wk%nx .or. nj < 1 .or. nj > wk%ny) cycle
+                        if (mask(ni,nj) /= 1.0_dp) cycle
+                        ! The neighbour sends toward (i,j) in the direction opposite to d.
+                        psi_in = psi_in + wk%psi_out(ni,nj) * wk%w8(K24_OPPOSITE(d),ni,nj)
+                    end do
+                end if
+                C_frz(i,j) = par%water_density * max(psi_in, 0.0_dp) / (par%ice_density * dx * dy)
+            end do
+        end do
+        !$omp end parallel do
+
+    end subroutine calc_capacity
 
     ! ============================================================
     ! Workspace management

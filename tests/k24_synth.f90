@@ -38,7 +38,7 @@ program k24_synth
     real(dp), allocatable :: h(:,:), b(:,:), mask(:,:), mdot(:,:)
     real(dp), allocatable :: uxy_b(:,:), A_glen(:,:), kappa(:,:)
     real(dp), allocatable :: G(:,:), q_T(:,:), i_eb(:,:), ux_b(:,:), uy_b(:,:), taub(:,:), c_till(:,:)
-    real(dp), allocatable :: q_x(:,:), q_y(:,:), N(:,:), p_w(:,:), W(:,:), q(:,:), Q_b(:,:), Q_diss(:,:)
+    real(dp), allocatable :: q_x(:,:), q_y(:,:), N(:,:), p_w(:,:), W(:,:), q(:,:), Q_b(:,:), Q_diss(:,:), C_frz(:,:)
     real(dp), allocatable :: xc(:), yc(:)
     real(dp), allocatable :: gsx(:,:), gsy(:,:), absgs(:,:), absg(:,:), phi0(:,:)
 
@@ -76,7 +76,7 @@ program k24_synth
     allocate(h(nx,ny), b(nx,ny), mask(nx,ny), mdot(nx,ny))
     allocate(uxy_b(nx,ny), A_glen(nx,ny), kappa(nx,ny))
     allocate(G(nx,ny), q_T(nx,ny), i_eb(nx,ny), ux_b(nx,ny), uy_b(nx,ny), taub(nx,ny), c_till(nx,ny))
-    allocate(q_x(nx,ny), q_y(nx,ny), N(nx,ny), p_w(nx,ny), W(nx,ny), q(nx,ny), Q_b(nx,ny), Q_diss(nx,ny))
+    allocate(q_x(nx,ny), q_y(nx,ny), N(nx,ny), p_w(nx,ny), W(nx,ny), q(nx,ny), Q_b(nx,ny), Q_diss(nx,ny), C_frz(nx,ny))
     allocate(gsx(nx,ny), gsy(nx,ny), absgs(nx,ny), absg(nx,ny), phi0(nx,ny))
 
     call nc_read(in_file, "xc",   xc)
@@ -107,7 +107,7 @@ program k24_synth
 
     call calc_k24(q_x, q_y, N, p_w, W, q, Q_b, Q_diss, &
                   h, b, mask, G, q_T, i_eb, uxy_b, A_glen, kappa, dx, dy, par, &
-                  ux_b=ux_b, uy_b=uy_b, tau_b_in=taub, c_till_in=c_till, &
+                  ux_b=ux_b, uy_b=uy_b, tau_b_in=taub, c_till_in=c_till, C_frz=C_frz, &
                   gsx_out=gsx, gsy_out=gsy, absgs_out=absgs, absg_out=absg, phi0_out=phi0)
 
     call nc_create(out_file)
@@ -119,6 +119,7 @@ program k24_synth
     call nc_write(out_file, "p_w",    p_w,    dim1="xc", dim2="yc")
     call nc_write(out_file, "Q_b",    Q_b,    dim1="xc", dim2="yc")
     call nc_write(out_file, "Q_diss", Q_diss, dim1="xc", dim2="yc")
+    call nc_write(out_file, "C_frz",  C_frz,  dim1="xc", dim2="yc")
     call nc_write(out_file, "mask",   mask,   dim1="xc", dim2="yc")
     call nc_write(out_file, "gsx",    gsx,    dim1="xc", dim2="yc")
     call nc_write(out_file, "gsy",    gsy,    dim1="xc", dim2="yc")
