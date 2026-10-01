@@ -53,9 +53,9 @@ run_case () {
         echo "JULIA FAILED (see $WORK/${name}_j.log)"; fail=1; return
     fi
     # k24_synth_compare.jl columns: field  max|J|  max|F-J|  rel_max  rel_max_all_cells
-    $JL tests/k24_synth_compare.jl "$WORK/${name}_f.nc" "$WORK/${name}_j.nc" phi0,absg,gsx,gsy,absgs,q,W,N,p_w,Q_b,Q_diss 2>&1 \
+    $JL tests/k24_synth_compare.jl "$WORK/${name}_f.nc" "$WORK/${name}_j.nc" phi0,absg,gsx,gsy,absgs,q,W,N,p_w,Q_b,Q_diss,C_frz 2>&1 \
         | awk -v tol="$TOL" '
-            /^(W|N|q|p_w|Q_b|Q_diss) /{
+            /^(W|N|q|p_w|Q_b|Q_diss|C_frz) /{
                 printf "%s=%s ", $1, $4
                 if ($4+0 > tol || $5+0 > tol) bad=1
             }

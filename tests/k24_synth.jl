@@ -155,6 +155,7 @@ if get_cfg("report", "0") == "1"
 end
 
 p_w = Array(model.Po) .- Array(state.N)
+C_frz = freeze_on_capacity!(zeros(Nx, Ny), model, grid, state)
 
 NCDataset(out_path, "c") do out
     defDim(out, "xc", Nx); defDim(out, "yc", Ny)
@@ -166,6 +167,7 @@ NCDataset(out_path, "c") do out
     defVar(out, "p_w",    p_w,                 ("xc", "yc"))
     defVar(out, "Q_b",    Array(model.Q_b),    ("xc", "yc"))
     defVar(out, "Q_diss", Array(model.Q_diss), ("xc", "yc"))
+    defVar(out, "C_frz",  C_frz,               ("xc", "yc"))
     defVar(out, "mask",   mask,                ("xc", "yc"))
     defVar(out, "gsx",    Array(model.minus_grad_phi0_sx), ("xc", "yc"))
     defVar(out, "gsy",    Array(model.minus_grad_phi0_sy), ("xc", "yc"))
