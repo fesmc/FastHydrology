@@ -102,6 +102,14 @@ module fast_hydrology
                                                    ! FastHydrology.jl. Zero when TRANSPORT_NONE.
         real(wp), allocatable :: N(:,:)            ! [Pa]
         real(wp), allocatable :: kappa(:,:)
+
+        ! Basal energy exchange with the ice model (supplied by the active
+        ! hydrology model or a coupled host; zero when not provided).
+        ! Heat fluxes are positive when heat goes into the ice-water
+        ! interface; a term that is switched off stays zero.
+        real(wp), allocatable :: C_frz(:,:)        ! [m/s]    freeze-on capacity, ice equivalent
+        real(wp), allocatable :: Q_diss(:,:)       ! [W/m2]   heat dissipated by the water flow
+        real(wp), allocatable :: Q_sens(:,:)       ! [W/m2]   sensible heat of the water flow
     end type
 
     type hydro_class
@@ -710,6 +718,9 @@ contains
         allocate(now%q(nx,ny))
         allocate(now%N(nx,ny))
         allocate(now%kappa(nx,ny))
+        allocate(now%C_frz(nx,ny))
+        allocate(now%Q_diss(nx,ny))
+        allocate(now%Q_sens(nx,ny))
 
         now%W_til     = 0.0_wp
         now%W_til_max = 0.0_wp
@@ -722,6 +733,9 @@ contains
         now%q         = 0.0_wp
         now%N         = 0.0_wp
         now%kappa     = 0.0_wp
+        now%C_frz     = 0.0_wp
+        now%Q_diss    = 0.0_wp
+        now%Q_sens    = 0.0_wp
 
         return
 
@@ -744,6 +758,9 @@ contains
         if (allocated(now%q))         deallocate(now%q)
         if (allocated(now%N))         deallocate(now%N)
         if (allocated(now%kappa))     deallocate(now%kappa)
+        if (allocated(now%C_frz))     deallocate(now%C_frz)
+        if (allocated(now%Q_diss))    deallocate(now%Q_diss)
+        if (allocated(now%Q_sens))    deallocate(now%Q_sens)
 
         return
 
