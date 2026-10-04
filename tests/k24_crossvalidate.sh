@@ -53,9 +53,11 @@ run_case () {
         echo "JULIA FAILED (see $WORK/${name}_j.log)"; fail=1; return
     fi
     # k24_synth_compare.jl columns: field  max|J|  max|F-J|  rel_max  rel_max_all_cells
-    $JL tests/k24_synth_compare.jl "$WORK/${name}_f.nc" "$WORK/${name}_j.nc" phi0,absg,gsx,gsy,absgs,q,W,N,p_w,Q_b,Q_diss,C_frz 2>&1 \
+    fields=phi0,absg,gsx,gsy,absgs,q,W,N,p_w,Q_b,Q_diss,C_frz
+    case "$jargs" in *ubfac=*) fields=$fields,N_ub ;; esac
+    $JL tests/k24_synth_compare.jl "$WORK/${name}_f.nc" "$WORK/${name}_j.nc" $fields 2>&1 \
         | awk -v tol="$TOL" '
-            /^(W|N|q|p_w|Q_b|Q_diss|C_frz) /{
+            /^(W|N|N_ub|q|p_w|Q_b|Q_diss|C_frz) /{
                 printf "%s=%s ", $1, $4
                 if ($4+0 > tol || $5+0 > tol) bad=1
             }
@@ -108,6 +110,15 @@ run_case regcoulfield   "sliding=regcoulombfield ctill=0.02"    "${SL}5/" \
 run_case shakti         "sliding=shakti ctill=0.02"             "${SL}6/" \
     's/^    k24_shakti_C                     = 0.0/    k24_shakti_C                     = 0.02/'
 run_case terms_qT_ieb   "qtfrac=0.3 iebfrac=0.5"
+
+# N from a new sliding speed with the routing held (k24_N_from_ub / N_from_ub!): N_ub is N for
+# 0.2 x and 5 x the sliding speed of the solve, compared like every other field.
+run_case ub_slower      "sliding=field ubfac=0.2"               "${SL}4/"
+run_case ub_faster      "sliding=field ubfac=5.0"               "${SL}4/"
+run_case ub_nofric      "ubfac=5.0"
+run_case ub_soft        "sliding=field substrate=soft ubfac=5.0" "${SL}4/" "${ST}1/"
+run_case ub_mixed_ineff "sliding=field substrate=mixed drainage=inefficient ubfac=5.0" "${SL}4/" "${ST}2/" "${DR}2/"
+run_case ub_qT_ieb      "sliding=field qtfrac=0.3 iebfrac=0.5 ubfac=5.0" "${SL}4/"
 run_case stagger        "sliding=field friction=staggered"      "${SL}4/" "${FD}1/"
 run_case stagger_quad   "sliding=field friction=staggeredquad"  "${SL}4/" "${FD}1/" "$FQ"
 run_case gdswarner      "routing=gdswarner"                     "${RT}1/"
