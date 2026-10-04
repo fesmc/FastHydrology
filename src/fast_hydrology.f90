@@ -117,6 +117,9 @@ module fast_hydrology
         real(wp), allocatable :: Q_diss(:,:)       ! [W/m2]   heat dissipated by the water flow
         real(wp), allocatable :: Q_sens(:,:)       ! [W/m2]   sensible heat of the water flow
         real(dp), allocatable :: diss_face(:,:)    ! [kg/m2/s] K24 face-assembled dissipation, warm start between steps
+        real(dp), allocatable :: k24_abs_g(:,:)    ! [-]      K24 routing-potential gradient of the last update (hydro_N_from_ub)
+        real(dp), allocatable :: k24_phi0(:,:)     ! [Pa]     K24 geometric potential of the last update (hydro_N_from_ub)
+        logical               :: k24_routed        ! a K24 update has run, so q/k24_abs_g/k24_phi0 are set
     end type
 
     type hydro_class
@@ -130,6 +133,8 @@ module fast_hydrology
     public :: hydro_init_state
     public :: hydro_update
     public :: hydro_calc_N
+    public :: hydro_N_responds_to_ub
+    public :: hydro_N_from_ub
     public :: wp
 
 contains
@@ -420,17 +425,20 @@ contains
                                       H_ice_dp, z_bed_dp, mask_dp, G_dp, q_T_dp, i_eb_dp, uxy_b_dp, A_glen_dp, &
                                       kappa_dp, real(hyd%par%dx, dp), real(hyd%par%dy, dp), hyd%par%k24, &
                                       ux_b=ux_b_dp, uy_b=uy_b_dp, tau_b_in=taub_dp, c_till_in=c_till_dp, &
-                                      diss_io=hyd%now%diss_face, C_frz=C_frz_dp)
+                                      diss_io=hyd%now%diss_face, C_frz=C_frz_dp, &
+                                      absg_out=hyd%now%k24_abs_g, phi0_out=hyd%now%k24_phi0)
                     else if (present(ux_b) .and. present(uy_b)) then
                         call calc_k24(q_x_dp, q_y_dp, N_dp, p_w_dp, W_dp, q_dp, Q_b_dp, Q_diss_dp, &
                                       H_ice_dp, z_bed_dp, mask_dp, G_dp, q_T_dp, i_eb_dp, uxy_b_dp, A_glen_dp, &
                                       kappa_dp, real(hyd%par%dx, dp), real(hyd%par%dy, dp), hyd%par%k24, &
-                                      ux_b=ux_b_dp, uy_b=uy_b_dp, diss_io=hyd%now%diss_face, C_frz=C_frz_dp)
+                                      ux_b=ux_b_dp, uy_b=uy_b_dp, diss_io=hyd%now%diss_face, C_frz=C_frz_dp, &
+                                      absg_out=hyd%now%k24_abs_g, phi0_out=hyd%now%k24_phi0)
                     else
                         call calc_k24(q_x_dp, q_y_dp, N_dp, p_w_dp, W_dp, q_dp, Q_b_dp, Q_diss_dp, &
                                       H_ice_dp, z_bed_dp, mask_dp, G_dp, q_T_dp, i_eb_dp, uxy_b_dp, A_glen_dp, &
                                       kappa_dp, real(hyd%par%dx, dp), real(hyd%par%dy, dp), hyd%par%k24, &
-                                      diss_io=hyd%now%diss_face, C_frz=C_frz_dp)
+                                      diss_io=hyd%now%diss_face, C_frz=C_frz_dp, &
+                                      absg_out=hyd%now%k24_abs_g, phi0_out=hyd%now%k24_phi0)
                     end if
 
                     hyd%now%q_x = real(q_x_dp, wp)
@@ -442,6 +450,7 @@ contains
                     hyd%now%Q_b    = real(Q_b_dp,    wp)
                     hyd%now%Q_diss = real(Q_diss_dp, wp)
                     hyd%now%C_frz  = real(C_frz_dp,  wp)
+                    hyd%now%k24_routed = .true.
 
                     deallocate(H_ice_dp, z_bed_dp, mask_dp)
                     deallocate(G_dp, q_T_dp, i_eb_dp, uxy_b_dp, A_glen_dp)
@@ -554,6 +563,48 @@ contains
     ! evaluate N on the geometry its dynamics is about to use (rather than
     ! the geometry of the last hydro_update). For K24 and N_CLOSURE_EXTERNAL,
     ! N is part of the evolving state and hyd%now%N is returned.
+    ! ------------------------------------------------------------
+    ! Effective pressure as a function of the host's sliding speed.
+    !
+    ! A steady hydrology (no state of its own between steps: N is set by the current ice state)
+    ! has to be evaluated together with the host's velocity solve, or N and u_b alternate between
+    ! two states from step to step. hydro_N_responds_to_ub says whether the active model is such a
+    ! hydrology; if so, the host calls hydro_N_from_ub inside its velocity iteration with its
+    ! current u_b and reads the new hyd%now%N (e.g. through hydro_calc_N). Prognostic hydrologies
+    ! (bucket, an external host-driven model) return .false. and need nothing.
+    ! ------------------------------------------------------------
+    logical function hydro_N_responds_to_ub(hyd)
+        implicit none
+        type(hydro_class), intent(IN) :: hyd
+        hydro_N_responds_to_ub = hyd%par%method_transport == TRANSPORT_K24
+    end function hydro_N_responds_to_ub
+
+    subroutine hydro_N_from_ub(hyd, H_ice, mask, uxy_b, A_glen)
+        ! hyd%now%N (and p_w) from the sliding speed uxy_b [m/s], with everything else as at the
+        ! last hydro_update: the routing (q, k24_abs_g, k24_phi0), kappa. The other inputs must be
+        ! the ones that update used: ice thickness H_ice [m], grounded-ice mask (1 = active) and
+        ! basal Glen A_glen [Pa^-3 s^-1]; they do not change during a velocity solve. A no-op
+        ! for a model that does not respond to u_b, or before the first K24 update.
+        implicit none
+        type(hydro_class), intent(INOUT) :: hyd
+        real(wp),          intent(IN)    :: H_ice(:,:), mask(:,:), uxy_b(:,:), A_glen(:,:)
+        real(dp), allocatable :: N_dp(:,:)
+
+        if (.not. hydro_N_responds_to_ub(hyd)) return
+        if (.not. hyd%now%k24_routed) return
+
+        allocate(N_dp(size(H_ice,1), size(H_ice,2)))
+        N_dp = real(hyd%now%N, dp)
+        call k24_N_from_ub(N_dp, real(hyd%now%q, dp), hyd%now%k24_abs_g, hyd%now%k24_phi0, real(mask, dp), &
+                           real(uxy_b, dp), real(A_glen, dp), real(hyd%now%kappa, dp), real(H_ice, dp), hyd%par%k24)
+        hyd%now%N   = real(N_dp, wp)
+        hyd%now%p_w = real(hyd%par%k24%ice_density * hyd%par%k24%gravity, wp) * H_ice - hyd%now%N   ! as calc_k24
+        deallocate(N_dp)
+
+        return
+
+    end subroutine hydro_N_from_ub
+
     ! ------------------------------------------------------------
     subroutine hydro_calc_N(hyd, N, H_ice, z_bed, z_sl, f_ice, f_grnd)
 
@@ -775,6 +826,7 @@ contains
         allocate(now%Q_b(nx,ny))
         allocate(now%Q_diss(nx,ny))
         allocate(now%diss_face(nx,ny))
+        allocate(now%k24_abs_g(nx,ny), now%k24_phi0(nx,ny))
         allocate(now%Q_sens(nx,ny))
 
         now%W_til     = 0.0_wp
@@ -792,6 +844,9 @@ contains
         now%Q_b       = 0.0_wp
         now%Q_diss    = 0.0_wp
         now%diss_face = 0.0_dp
+        now%k24_abs_g = 0.0_dp
+        now%k24_phi0  = 0.0_dp
+        now%k24_routed = .false.
         now%Q_sens    = 0.0_wp
 
         return
@@ -813,6 +868,8 @@ contains
         if (allocated(now%q_x))       deallocate(now%q_x)
         if (allocated(now%q_y))       deallocate(now%q_y)
         if (allocated(now%q))         deallocate(now%q)
+        if (allocated(now%k24_abs_g)) deallocate(now%k24_abs_g)
+        if (allocated(now%k24_phi0))  deallocate(now%k24_phi0)
         if (allocated(now%N))         deallocate(now%N)
         if (allocated(now%kappa))     deallocate(now%kappa)
         if (allocated(now%C_frz))     deallocate(now%C_frz)
