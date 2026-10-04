@@ -304,6 +304,7 @@ module fast_hydrology_k24
     public :: k24_finalize_par
     public :: initialize_kappa
     public :: calc_k24
+    public :: k24_N_from_ub
 
 contains
 
@@ -775,6 +776,34 @@ contains
         return
 
     end subroutine calc_k24
+
+    subroutine k24_N_from_ub(N, q, abs_g, phi0, mask, uxy_b, A_glen, kappa, H_ice, par)
+        ! K24's effective pressure for a new sliding speed uxy_b, with the routing of the last
+        ! calc_k24 held: q (distributed flux), abs_g (routing-potential gradient) and phi0 (true
+        ! geometric potential). This is update_N alone. A host calls it inside its velocity
+        ! iteration, so that N and u_b are solved together rather than lagged by a step (a lag
+        ! makes them alternate between two states every step: N rises with u_b through the
+        ! cavity opening in N_inf, and u_b falls steeply with N through the friction law).
+        !
+        ! Holding the routing is exact when q does not depend on u_b, i.e. under
+        ! K24_SLIDING_NO_FRICTION (no frictional heat in the water source); with a friction law
+        ! the routing lags the velocity iteration by one call of calc_k24.
+        implicit none
+        real(dp),              intent(INOUT) :: N(:,:)
+        real(dp),              intent(IN)    :: q(:,:), abs_g(:,:), phi0(:,:), mask(:,:)
+        real(dp),              intent(IN)    :: uxy_b(:,:), A_glen(:,:), kappa(:,:), H_ice(:,:)
+        type(k24_param_class), intent(IN)    :: par
+        type(k24_work_class) :: wk
+
+        call k24_work_alloc(wk, size(N,1), size(N,2))
+        wk%abs_g = abs_g
+        wk%phi0  = phi0
+        call update_N(N, q, wk, mask, uxy_b, A_glen, kappa, H_ice, par)
+        call k24_work_free(wk)
+
+        return
+
+    end subroutine k24_N_from_ub
 
     subroutine calc_capacity(C_frz, wk, mask, dx, dy, par)
         ! Freeze-on capacity [m/s ice equivalent] of each grounded cell: the
