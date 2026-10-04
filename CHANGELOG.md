@@ -5,6 +5,10 @@ Format follows [Keep a Changelog](https://keepachangelog.com/); versioning is [S
 
 ## [Unreleased]
 ### Changed
+- `bkt_floating_mode` defaults to 0 (ZERO), as the enum comment already stated; the code
+  fallback and `par/k24_greenland.nml`, `par/shmip.nml` used 1 (MARGIN_FILL). MARGIN_FILL
+  keeps grounded cells next to floating ice saturated, which holds N near zero at the
+  grounding line for centuries (Yelmo TROUGH-F17).
 - Physical constants come from the host. `hydro_init` takes an optional `cnst`
   (fesm-utils `phys_const_class`) and an optional `sec_year`; `hydro_param_class` gains
   `rho_ice`, `rho_w`, `g` and `sec_year` fields. The module-level `SEC_PER_YEAR`, `RHO_ICE`,
