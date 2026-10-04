@@ -101,7 +101,7 @@ contains
         ! Defaults in namelist units (m/a) for till_rate.
         par%till_rate     = 1.0e-3_wp
         par%N_closure     = 0
-        par%floating_mode = FLOATING_MARGIN_FILL
+        par%floating_mode = FLOATING_ZERO
 
         call nml_read(filename,group,"bkt_till_rate",     par%till_rate,     init=init_pars,defaults_file=def_file,defaults_group=def_group)
         call nml_read(filename,group,"bkt_N_closure",     par%N_closure,     init=init_pars,defaults_file=def_file,defaults_group=def_group)

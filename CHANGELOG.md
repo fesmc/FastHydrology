@@ -4,6 +4,12 @@ All notable changes to FastHydrology are documented here.
 Format follows [Keep a Changelog](https://keepachangelog.com/); versioning is [SemVer](https://semver.org/).
 
 ## [Unreleased]
+### Changed
+- `bkt_floating_mode` defaults to 0 (ZERO), as the enum comment already stated; the code
+  fallback and `par/k24_greenland.nml`, `par/shmip.nml` used 1 (MARGIN_FILL). MARGIN_FILL
+  keeps grounded cells next to floating ice saturated, which holds N near zero at the
+  grounding line for centuries (Yelmo TROUGH-F17).
+
 ### Added
 - Periodic domains: `hydro_init` takes optional `periodic_x`/`periodic_y` (default `.false.`,
   which leaves every result unchanged). A periodic direction wraps with period `nx`/`ny` and no
