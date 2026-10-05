@@ -43,6 +43,7 @@
     k24_friction_discretization      = 0        ! 0=CELL (tau_b*|u_b|) 1=STAGGERED (C-grid velocities)
     k24_friction_quadrature          = False    ! STAGGERED only: Yelmo's qb_method=2 Gauss-point heat
     k24_toposort_allow_cycles        = False    ! TopologicalPsiOut(allow_cycles=...)
+    k24_ub_hook                      = True     ! host velocity iteration re-evaluates N from u_b (hydro_N_from_ub); False = N once per host step
     k24_drainage_mode                = 0        ! 0=BOTH 1=EFFICIENT_ONLY 2=INEFFICIENT_ONLY
     k24_water_thickness_algorithm    = 0        ! 0=DARCY_WEISBACH 1=LAMINAR 2=AREAL_CONDUIT
     k24_gradient_convention          = 0        ! 0=MEAN 1=LOCAL (Darcy-Weisbach / laminar closures only)

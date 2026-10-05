@@ -571,12 +571,13 @@ contains
     ! two states from step to step. hydro_N_responds_to_ub says whether the active model is such a
     ! hydrology; if so, the host calls hydro_N_from_ub inside its velocity iteration with its
     ! current u_b and reads the new hyd%now%N (e.g. through hydro_calc_N). Prognostic hydrologies
-    ! (bucket, an external host-driven model) return .false. and need nothing.
+    ! (bucket, an external host-driven model) return .false. and need nothing. k24_ub_hook = .false.
+    ! switches the hook off for K24 too (N once per host step, e.g. to measure the hook's effect).
     ! ------------------------------------------------------------
     logical function hydro_N_responds_to_ub(hyd)
         implicit none
         type(hydro_class), intent(IN) :: hyd
-        hydro_N_responds_to_ub = hyd%par%method_transport == TRANSPORT_K24
+        hydro_N_responds_to_ub = hyd%par%method_transport == TRANSPORT_K24 .and. hyd%par%k24%ub_hook
     end function hydro_N_responds_to_ub
 
     subroutine hydro_N_from_ub(hyd, H_ice, mask, uxy_b, A_glen)
