@@ -5,6 +5,13 @@ Format follows [Keep a Changelog](https://keepachangelog.com/); versioning is [S
 
 ## [Unreleased]
 ### Changed
+- K24 freeze-on capacity `C_frz` includes the water from above: it is now
+  `(rho_w*Psi_in/(dx*dy) + i_eb)/rho_i`, not `rho_w*Psi_in/(rho_i*dx*dy)`. `i_eb`
+  (Yelmo's drained englacial water `melt_int`) is water that reaches the cell and can be
+  frozen, and unlike the cell's own melt and dissipation it is in no heat balance, so the
+  host's freezing demand does not count it. Before, a cell short of water passed its
+  `i_eb` downstream unfrozen while the host froze only the routed inflow. Matches
+  FastHydrology.jl `freeze_on_capacity!`. No change where `i_eb = 0`.
 - `bkt_floating_mode` defaults to 0 (ZERO), as the enum comment already stated; the code
   fallback and `par/k24_greenland.nml`, `par/shmip.nml` used 1 (MARGIN_FILL). MARGIN_FILL
   keeps grounded cells next to floating ice saturated, which holds N near zero at the
