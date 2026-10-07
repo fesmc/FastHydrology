@@ -2,7 +2,7 @@
 # FastHydrology.jl's kazmierczak2024 model on them.
 #
 # usage: julia k24_synth.jl <out.nc> [key=value ...]
-#   aglen=<float>  substrate=hard|soft|mixed  drainage=both|efficient|inefficient
+#   aglen=<float>  substrate=hard|soft|mixed|mixed_smooth  drainage=both|efficient|inefficient
 #   wthick=darcy|laminar|areal  grad=mean|local  kamb86=<float>
 #   routing=warner|gdswarner|quinn|quinnorig|tarboton|modtarboton|gdstarboton
 #   fill=auto|jacobi|lowest|flood  qconv=auto|outflow|face  dissdisc=auto|cell|face
@@ -61,6 +61,7 @@ substrate = get_cfg("substrate", "hard")
 kappa = zeros(Nx, Ny)
 substrate == "soft"  && (kappa .= 1.0)
 substrate == "mixed" && (kappa[b .< -1000.0] .= 1.0)
+substrate == "mixed_smooth" && (kappa .= clamp.((-500.0 .- b) ./ 1000.0, 0.0, 1.0))
 
 grad_conv = get_cfg("grad", "mean") == "local" ? LocalGradient() : MeanGradient()
 

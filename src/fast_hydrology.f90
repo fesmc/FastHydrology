@@ -194,9 +194,12 @@ contains
 
     end subroutine hydro_init
 
-    subroutine hydro_init_state(hyd, H_ice, z_bed, f_ice, f_grnd, time, W_til, W)
+    subroutine hydro_init_state(hyd, H_ice, z_bed, f_ice, f_grnd, time, W_til, W, kappa)
         ! Initialize state for the first update. Kappa is filled only when
-        ! method_transport == K24. hyd%now%W_til and hyd%now%W are populated
+        ! method_transport == K24, from k24_substrate_type; with
+        ! K24_SUBSTRATE_EXTERNAL the host passes the optional kappa argument
+        ! (0 hard bed .. 1 soft bed, clamped to [0,1]; required for EXTERNAL,
+        ! ignored otherwise). hyd%now%W_til and hyd%now%W are populated
         ! from the optional W_til / W arguments (zero when absent); the
         ! floating + adjacent-to-floating override is applied to W_til for
         ! TIL_BUCKET. Per-cell W_til_max is filled from par%W_til_max (host
@@ -216,6 +219,7 @@ contains
         real(wp),          intent(IN)           :: time
         real(wp),          intent(IN), optional :: W_til(:,:)
         real(wp),          intent(IN), optional :: W(:,:)
+        real(wp),          intent(IN), optional :: kappa(:,:)
 
         real(dp), allocatable :: z_bed_dp(:,:), kappa_dp(:,:)
         integer :: nx, ny
@@ -226,8 +230,20 @@ contains
         if (hyd%par%method_transport == TRANSPORT_K24) then
             allocate(z_bed_dp(nx,ny), kappa_dp(nx,ny))
             z_bed_dp = real(z_bed, dp)
-            call initialize_kappa(kappa_dp, z_bed_dp, hyd%par%k24%substrate_type)
+            call initialize_kappa(kappa_dp, z_bed_dp, hyd%par%k24%substrate_type, &
+                                  hyd%par%k24%kappa_z_hard, hyd%par%k24%kappa_z_soft)
             hyd%now%kappa = real(kappa_dp, wp)
+            if (hyd%par%k24%substrate_type == K24_SUBSTRATE_EXTERNAL) then
+                if (.not. present(kappa)) then
+                    write(*,*) "hydro_init_state:: error: k24_substrate_type = 4 (EXTERNAL) needs the kappa argument."
+                    stop
+                end if
+                if (size(kappa,1) /= nx .or. size(kappa,2) /= ny) then
+                    write(*,*) "hydro_init_state:: error: kappa must have the shape of z_bed."
+                    stop
+                end if
+                hyd%now%kappa = min(1.0_wp, max(0.0_wp, kappa))
+            end if
             deallocate(z_bed_dp, kappa_dp)
         else
             hyd%now%kappa = 0.0_wp
