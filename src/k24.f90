@@ -77,7 +77,7 @@ module fast_hydrology_k24
     real(dp), parameter :: K24_PI = 3.14159265358979323846_dp
 
     ! Seconds per year used by the parameter defaults FastHydrology.jl writes
-    ! as perYear2perSecond(...) -- eta_w, the sliding laws' u0 and the
+    ! as perYear2perSecond(...) -- water_viscosity, the sliding laws' u0 and the
     ! staggered-friction velocity floor. Julia's SECONDS_PER_YEAR is the Julian
     ! year, 60^2*24*365.25. Deliberately NOT par%sec_year, the host's calendar
     ! year, which converts the public API's time argument.
@@ -188,26 +188,26 @@ module fast_hydrology_k24
         integer  :: gradient_convention         ! DarcyWeisbach/Laminar gradient_convention
         integer  :: sliding_law                 ! sliding_law
         logical  :: toposort_allow_cycles       ! TopologicalPsiOut.allow_cycles
-        logical  :: ub_hook                     ! (Fortran-only) host re-evaluates N from its sliding speed inside its velocity iteration (hydro_N_from_ub)
+        logical  :: N_ub_coupled                ! (Fortran-only) host re-evaluates N from its sliding speed inside its velocity iteration (hydro_N_from_ub)
 
         ! -- physical constants (water/ice/gravity come from the top level) --
         real(dp) :: water_density               ! rho_w  [kg/m3]
         real(dp) :: ice_density                 ! rho_i  [kg/m3]
         real(dp) :: gravity                     ! g      [m/s2]
-        real(dp) :: manning_exponent            ! n      Glen's flow-law exponent
+        real(dp) :: glen_n                      ! n      Glen's flow-law exponent
         real(dp) :: latent_heat_water           ! L_w    [J/kg]
-        real(dp) :: bed_thickness               ! h_b    bed obstacle height [m]
-        real(dp) :: manning_coefficient_exponent! alpha
-        real(dp) :: bed_friction_exponent       ! beta
+        real(dp) :: bed_bump_height             ! h_b    bed obstacle height [m]
+        real(dp) :: flux_W_exponent ! alpha
+        real(dp) :: flux_grad_exponent          ! beta
         real(dp) :: friction_factor             ! f      Darcy-Weisbach friction factor
         real(dp) :: till_factor                 ! F_till
         real(dp) :: critical_discharge          ! Q_c    [m3/s]
-        real(dp) :: initial_cavity_height       ! H_0    [m]
-        real(dp) :: coupling_length             ! l_c    conduit spacing [m]
+        real(dp) :: H0_efficient                ! H_0    [m]
+        real(dp) :: conduit_spacing             ! l_c    conduit spacing [m]
         real(dp) :: coupling_length_kamb86      ! coupling_length_kamb86: Kamb & Echelmeyer (1986) stress-gradient-
                                                  ! coupling length as a multiple of mean ice thickness (>= 0; 0 disables)
         real(dp) :: min_pressure_fraction       ! sigmat
-        real(dp) :: eta_w                       ! eta_w  [Pa s]
+        real(dp) :: water_viscosity             ! water_viscosity [Pa s]
 
         ! -- clamps --
         real(dp) :: W_min                       ! Wmin  [m]
@@ -222,9 +222,9 @@ module fast_hydrology_k24
         real(dp) :: dissipation_rtol            ! dissipation_rtol
         logical  :: dissipation_melt            ! dissipation_melt
         logical  :: dissipation_verbose         ! dissipation_verbose
-        integer  :: max_coupling_iters          ! max_coupling_iters
-        real(dp) :: coupling_rtol               ! coupling_rtol
-        logical  :: coupling_verbose            ! coupling_verbose
+        integer  :: max_qN_iters                ! max_qN_iters
+        real(dp) :: qN_rtol                     ! qN_rtol
+        logical  :: qN_verbose                  ! qN_verbose
 
         ! -- sliding-law parameters, one set per law so each keeps Julia's own
         !    per-law default (the velocity exponent q differs between them) --
@@ -355,31 +355,31 @@ contains
         par%gradient_convention           = K24_GRAD_MEAN
         par%sliding_law                   = K24_SLIDING_NO_FRICTION
         par%toposort_allow_cycles         = .FALSE.
-        par%ub_hook                       = .TRUE.
+        par%N_ub_coupled                  = .TRUE.
 
         par%water_density                 = 1000.0_dp
         par%ice_density                   =  917.0_dp
         par%gravity                       =    9.81_dp
-        par%manning_exponent              =    3.0_dp
+        par%glen_n                        =    3.0_dp
         ! L_w = 3.34e5 (KAZMIERCZAK_DEFAULT_L_W).
         par%latent_heat_water             =    3.34e5_dp
-        par%bed_thickness                 =    0.1_dp
-        par%manning_coefficient_exponent  =    1.25_dp      ! alpha = 5/4
-        par%bed_friction_exponent         =    1.5_dp       ! beta  = 3/2
+        par%bed_bump_height               =    0.1_dp
+        par%flux_W_exponent               =    1.25_dp      ! alpha = 5/4
+        par%flux_grad_exponent            =    1.5_dp       ! beta  = 3/2
         par%friction_factor               =    0.1_dp
         par%till_factor                   =    1.1_dp
         par%critical_discharge            =    1.0_dp
-        par%initial_cavity_height         =    0.1_dp
-        par%coupling_length               =    1.0e4_dp
+        par%H0_efficient                  =    0.1_dp
+        par%conduit_spacing               =    1.0e4_dp
         ! Upper edge of Kamb & Echelmeyer's 4-10x ice-thickness range for ice
         ! sheets (~1-3x valley glaciers, ~12x surging). 0 at grids coarser
         ! than the coupling length.
         par%coupling_length_kamb86        =   10.0_dp
         ! sigmat = 0 -- no N_inf floor. Pass 0.02 for KORI-ULB's own value.
         par%min_pressure_fraction         =    0.0_dp
-        ! eta_w = perYear2perSecond(1.8e-3): KORI-ULB's par.waterviscosity is a
+        ! water_viscosity = perYear2perSecond(1.8e-3): KORI-ULB's par.waterviscosity is a
         ! per-year quantity.
-        par%eta_w                         = 1.8e-3_dp / K24_SEC_PER_YEAR
+        par%water_viscosity               = 1.8e-3_dp / K24_SEC_PER_YEAR
 
         ! The four KORI-ULB clamps, off by default. huge() stands in for Inf.
         par%W_min                         =    0.0_dp
@@ -393,9 +393,9 @@ contains
         par%dissipation_rtol              = 1.0e-12_dp
         par%dissipation_melt              = .TRUE.
         par%dissipation_verbose           = .TRUE.
-        par%max_coupling_iters            =   20
-        par%coupling_rtol                 = 1.0e-8_dp
-        par%coupling_verbose              = .TRUE.
+        par%max_qN_iters                  =   20
+        par%qN_rtol                       = 1.0e-8_dp
+        par%qN_verbose                    = .TRUE.
 
         ! Sliding-law parameters. C and c_till have no Julia default (they are
         ! mandatory there); 0 here makes an unconfigured law a no-op.
@@ -430,24 +430,24 @@ contains
         call nml_read(filename,group,"k24_gradient_convention",           par%gradient_convention,           init=init_pars,defaults_file=def_file,defaults_group=def_group)
         call nml_read(filename,group,"k24_sliding_law",                   par%sliding_law,                   init=init_pars,defaults_file=def_file,defaults_group=def_group)
         call nml_read(filename,group,"k24_toposort_allow_cycles",         par%toposort_allow_cycles,         init=init_pars,defaults_file=def_file,defaults_group=def_group)
-        call nml_read(filename,group,"k24_ub_hook",                       par%ub_hook,                       init=init_pars,defaults_file=def_file,defaults_group=def_group)
+        call nml_read(filename,group,"k24_N_ub_coupled",                   par%N_ub_coupled,                  init=init_pars,defaults_file=def_file,defaults_group=def_group)
         ! water_density, ice_density, gravity are set from top-level
         ! rho_w / rho_ice / g in hydro_par_load (single source of truth).
-        call nml_read(filename,group,"k24_manning_exponent",              par%manning_exponent,              init=init_pars,defaults_file=def_file,defaults_group=def_group)
+        call nml_read(filename,group,"k24_glen_n",                         par%glen_n,                        init=init_pars,defaults_file=def_file,defaults_group=def_group)
         if (read_phys_const) then
             call nml_read(filename,group,"k24_latent_heat_water",             par%latent_heat_water,             init=init_pars,defaults_file=def_file,defaults_group=def_group)
         end if
-        call nml_read(filename,group,"k24_bed_thickness",                 par%bed_thickness,                 init=init_pars,defaults_file=def_file,defaults_group=def_group)
-        call nml_read(filename,group,"k24_manning_coefficient_exponent",  par%manning_coefficient_exponent,  init=init_pars,defaults_file=def_file,defaults_group=def_group)
-        call nml_read(filename,group,"k24_bed_friction_exponent",         par%bed_friction_exponent,         init=init_pars,defaults_file=def_file,defaults_group=def_group)
+        call nml_read(filename,group,"k24_bed_bump_height",                par%bed_bump_height,               init=init_pars,defaults_file=def_file,defaults_group=def_group)
+        call nml_read(filename,group,"k24_flux_W_exponent",                par%flux_W_exponent,               init=init_pars,defaults_file=def_file,defaults_group=def_group)
+        call nml_read(filename,group,"k24_flux_grad_exponent",             par%flux_grad_exponent,            init=init_pars,defaults_file=def_file,defaults_group=def_group)
         call nml_read(filename,group,"k24_friction_factor",               par%friction_factor,               init=init_pars,defaults_file=def_file,defaults_group=def_group)
         call nml_read(filename,group,"k24_till_factor",                   par%till_factor,                   init=init_pars,defaults_file=def_file,defaults_group=def_group)
         call nml_read(filename,group,"k24_critical_discharge",            par%critical_discharge,            init=init_pars,defaults_file=def_file,defaults_group=def_group)
-        call nml_read(filename,group,"k24_initial_cavity_height",         par%initial_cavity_height,         init=init_pars,defaults_file=def_file,defaults_group=def_group)
-        call nml_read(filename,group,"k24_coupling_length",               par%coupling_length,               init=init_pars,defaults_file=def_file,defaults_group=def_group)
+        call nml_read(filename,group,"k24_H0_efficient",                   par%H0_efficient,                  init=init_pars,defaults_file=def_file,defaults_group=def_group)
+        call nml_read(filename,group,"k24_conduit_spacing",                par%conduit_spacing,               init=init_pars,defaults_file=def_file,defaults_group=def_group)
         call nml_read(filename,group,"k24_coupling_length_kamb86",        par%coupling_length_kamb86,        init=init_pars,defaults_file=def_file,defaults_group=def_group)
         call nml_read(filename,group,"k24_min_pressure_fraction",         par%min_pressure_fraction,         init=init_pars,defaults_file=def_file,defaults_group=def_group)
-        call nml_read(filename,group,"k24_eta_w",                         par%eta_w,                         init=init_pars,defaults_file=def_file,defaults_group=def_group)
+        call nml_read(filename,group,"k24_water_viscosity",                par%water_viscosity,               init=init_pars,defaults_file=def_file,defaults_group=def_group)
         call nml_read(filename,group,"k24_W_min",                         par%W_min,                         init=init_pars,defaults_file=def_file,defaults_group=def_group)
         call nml_read(filename,group,"k24_W_max",                         par%W_max,                         init=init_pars,defaults_file=def_file,defaults_group=def_group)
         call nml_read(filename,group,"k24_q_min",                         par%q_min,                         init=init_pars,defaults_file=def_file,defaults_group=def_group)
@@ -458,9 +458,9 @@ contains
         call nml_read(filename,group,"k24_dissipation_rtol",              par%dissipation_rtol,              init=init_pars,defaults_file=def_file,defaults_group=def_group)
         call nml_read(filename,group,"k24_dissipation_melt",              par%dissipation_melt,              init=init_pars,defaults_file=def_file,defaults_group=def_group)
         call nml_read(filename,group,"k24_dissipation_verbose",           par%dissipation_verbose,           init=init_pars,defaults_file=def_file,defaults_group=def_group)
-        call nml_read(filename,group,"k24_max_coupling_iters",            par%max_coupling_iters,            init=init_pars,defaults_file=def_file,defaults_group=def_group)
-        call nml_read(filename,group,"k24_coupling_rtol",                 par%coupling_rtol,                 init=init_pars,defaults_file=def_file,defaults_group=def_group)
-        call nml_read(filename,group,"k24_coupling_verbose",              par%coupling_verbose,              init=init_pars,defaults_file=def_file,defaults_group=def_group)
+        call nml_read(filename,group,"k24_max_qN_iters",                   par%max_qN_iters,                  init=init_pars,defaults_file=def_file,defaults_group=def_group)
+        call nml_read(filename,group,"k24_qN_rtol",                        par%qN_rtol,                       init=init_pars,defaults_file=def_file,defaults_group=def_group)
+        call nml_read(filename,group,"k24_qN_verbose",                     par%qN_verbose,                    init=init_pars,defaults_file=def_file,defaults_group=def_group)
         call nml_read(filename,group,"k24_weertman_C",                    par%weertman_C,                    init=init_pars,defaults_file=def_file,defaults_group=def_group)
         call nml_read(filename,group,"k24_weertman_q",                    par%weertman_q,                    init=init_pars,defaults_file=def_file,defaults_group=def_group)
         call nml_read(filename,group,"k24_power_plastic_c_till",          par%power_plastic_c_till,          init=init_pars,defaults_file=def_file,defaults_group=def_group)
@@ -2104,9 +2104,9 @@ contains
         if (pressure_dependent_law(par)) then
 
             converged = .FALSE.
-            n_iters   = par%max_coupling_iters
+            n_iters   = par%max_qN_iters
 
-            do iter = 1, par%max_coupling_iters
+            do iter = 1, par%max_qN_iters
 
                 wk%q_prev = q
                 wk%N_prev = N
@@ -2123,8 +2123,8 @@ contains
 
                 q_scale = max(masked_max_abs(q, mask), epsilon(1.0_dp))
                 N_scale = max(masked_max_abs(N, mask), epsilon(1.0_dp))
-                q_ok = masked_max_abs_diff(q, wk%q_prev, mask) <= par%coupling_rtol * q_scale
-                N_ok = masked_max_abs_diff(N, wk%N_prev, mask) <= par%coupling_rtol * N_scale
+                q_ok = masked_max_abs_diff(q, wk%q_prev, mask) <= par%qN_rtol * q_scale
+                N_ok = masked_max_abs_diff(N, wk%N_prev, mask) <= par%qN_rtol * N_scale
 
                 if (q_ok .and. N_ok) then
                     converged = .TRUE.
@@ -2134,11 +2134,11 @@ contains
 
             end do
 
-            if (par%coupling_verbose) then
+            if (par%qN_verbose) then
                 if (converged) then
                     write(*,'(a,i0,a)') " k24: (q,N) coupling Picard loop converged after ", n_iters, " iteration(s)."
                 else
-                    write(*,'(a,i0,a)') " k24: (q,N) coupling Picard loop did NOT converge (hit max_coupling_iters = ", n_iters, ")."
+                    write(*,'(a,i0,a)') " k24: (q,N) coupling Picard loop did NOT converge (hit max_qN_iters = ", n_iters, ")."
                 end if
             end if
 
@@ -2889,11 +2889,11 @@ contains
 
         nx = wk%nx; ny = wk%ny
 
-        K_fac       = par%K**(-1.0_dp / par%manning_coefficient_exponent)
-        grad_exp    = (1.0_dp - par%bed_friction_exponent) / par%manning_coefficient_exponent
-        Q_exp       = 1.0_dp / par%manning_coefficient_exponent
-        denom_const = 2.0_dp * par%manning_exponent**(-par%manning_exponent) * par%ice_density * par%latent_heat_water
-        inv_n       = 1.0_dp / par%manning_exponent
+        K_fac       = par%K**(-1.0_dp / par%flux_W_exponent)
+        grad_exp    = (1.0_dp - par%flux_grad_exponent) / par%flux_W_exponent
+        Q_exp       = 1.0_dp / par%flux_W_exponent
+        denom_const = 2.0_dp * par%glen_n**(-par%glen_n) * par%ice_density * par%latent_heat_water
+        inv_n       = 1.0_dp / par%glen_n
         sqrt_pi     = sqrt(K24_PI)
         Q_c         = par%critical_discharge
 
@@ -2924,7 +2924,7 @@ contains
                     cycle
                 end if
 
-                Q_ij = q(i,j) * par%coupling_length
+                Q_ij = q(i,j) * par%conduit_spacing
 
                 ! DEVIATION 1: zero flux means zero conduit cross-section.
                 if (Q_ij == 0.0_dp) then
@@ -2950,8 +2950,8 @@ contains
                             expo = exp(-Q_ij / Q_c)
                         end if
                 end select
-                Hs = max(0.0_dp, par%initial_cavity_height &
-                     + (sqrt(S_ij) / par%till_factor - par%initial_cavity_height) * expo)
+                Hs = max(0.0_dp, par%H0_efficient &
+                     + (sqrt(S_ij) / par%till_factor - par%H0_efficient) * expo)
                 if (Q_ij == 0.0_dp .and. (par%drainage_mode == K24_DRAINAGE_EFFICIENT .or. &
                     (par%drainage_mode == K24_DRAINAGE_BOTH .and. Q_c == 0.0_dp))) then
                     Hs = 0.0_dp
@@ -2965,7 +2965,7 @@ contains
                 else
                     Ninf_ij = min(max( &
                         ((H_ij * H_ij) / (S_ij * S_ij) * (sliding_coeff * par%ice_density * par%latent_heat_water &
-                            * uxy_b(i,j) * par%bed_thickness + melt_coeff * Q_ij * wk%abs_g(i,j)) &
+                            * uxy_b(i,j) * par%bed_bump_height + melt_coeff * Q_ij * wk%abs_g(i,j)) &
                          / (denom_const * A_glen(i,j)))**inv_n, &
                         par%min_pressure_fraction * Po_ij), Po_ij)
                 end if
@@ -3011,7 +3011,7 @@ contains
                 !$omp parallel do default(shared) private(i,j) schedule(static)
                 do j = 1, ny
                     do i = 1, nx
-                        W(i,j) = wk%S_inf(i,j) / par%coupling_length
+                        W(i,j) = wk%S_inf(i,j) / par%conduit_spacing
                     end do
                 end do
                 !$omp end parallel do
@@ -3042,7 +3042,7 @@ contains
                 end if
 
             case (K24_WTHICK_LAMINAR)
-                ! d = (12*eta_w*q / |grad phi0_s|)^(1/3), routing directions.
+                ! d = (12*water_viscosity*q / |grad phi0_s|)^(1/3), routing directions.
                 if (par%gradient_convention == K24_GRAD_MEAN) then
                     ! Julia adds no eps guard in this branch; the max() below
                     ! keeps a zero-mean domain finite.
@@ -3053,7 +3053,7 @@ contains
                         !$omp parallel do default(shared) private(i,j,num) schedule(static)
                         do j = 1, ny
                             do i = 1, nx
-                                num = 12.0_dp * par%eta_w * q(i,j) / g_mean
+                                num = 12.0_dp * par%water_viscosity * q(i,j) / g_mean
                                 W(i,j) = min(par%W_max, max(par%W_min, num**third))
                             end do
                         end do
@@ -3063,7 +3063,7 @@ contains
                     !$omp parallel do default(shared) private(i,j,num) schedule(static)
                     do j = 1, ny
                         do i = 1, nx
-                            num = 12.0_dp * par%eta_w * q(i,j) / (wk%abs_gs(i,j) + epsilon(1.0_dp))
+                            num = 12.0_dp * par%water_viscosity * q(i,j) / (wk%abs_gs(i,j) + epsilon(1.0_dp))
                             W(i,j) = min(par%W_max, max(par%W_min, num**third))
                         end do
                     end do

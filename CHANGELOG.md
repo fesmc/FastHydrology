@@ -5,6 +5,18 @@ Format follows [Keep a Changelog](https://keepachangelog.com/); versioning is [S
 
 ## [Unreleased]
 ### Changed
+- K24 namelist parameters renamed (fesmc/FastHydrology#14), in step with the
+  FastHydrology.jl constructor keywords. Old names are no longer read, so host namelists
+  must be updated (an unrecognised key falls back to the default without error):
+  `k24_ub_hook` -> `k24_N_ub_coupled`, `k24_manning_exponent` -> `k24_glen_n`,
+  `k24_manning_coefficient_exponent` -> `k24_flux_W_exponent`,
+  `k24_bed_friction_exponent` -> `k24_flux_grad_exponent`,
+  `k24_bed_thickness` -> `k24_bed_bump_height`,
+  `k24_initial_cavity_height` -> `k24_H0_efficient`,
+  `k24_coupling_length` -> `k24_conduit_spacing`, `k24_eta_w` -> `k24_water_viscosity`,
+  `k24_max_coupling_iters` / `k24_coupling_rtol` / `k24_coupling_verbose` ->
+  `k24_max_qN_iters` / `k24_qN_rtol` / `k24_qN_verbose`. Values and defaults unchanged;
+  `k24_coupling_length_kamb86` keeps its name.
 - K24 freeze-on capacity `C_frz` includes the water from above: it is now
   `(rho_w*Psi_in/(dx*dy) + i_eb)/rho_i`, not `rho_w*Psi_in/(rho_i*dx*dy)`. `i_eb`
   (Yelmo's drained englacial water `melt_int`) is water that reaches the cell and can be

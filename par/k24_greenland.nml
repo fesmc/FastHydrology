@@ -43,23 +43,23 @@
     k24_friction_discretization      = 0        ! 0=CELL (tau_b*|u_b|) 1=STAGGERED (C-grid velocities)
     k24_friction_quadrature          = False    ! STAGGERED only: Yelmo's qb_method=2 Gauss-point heat
     k24_toposort_allow_cycles        = False    ! TopologicalPsiOut(allow_cycles=...)
-    k24_ub_hook                      = True     ! host velocity iteration re-evaluates N from u_b (hydro_N_from_ub); False = N once per host step
+    k24_N_ub_coupled                 = True     ! host velocity iteration re-evaluates N from u_b (hydro_N_from_ub); False = N once per host step
     k24_drainage_mode                = 0        ! 0=BOTH 1=EFFICIENT_ONLY 2=INEFFICIENT_ONLY
     k24_water_thickness_algorithm    = 0        ! 0=DARCY_WEISBACH 1=LAMINAR 2=AREAL_CONDUIT
     k24_gradient_convention          = 0        ! 0=MEAN 1=LOCAL (Darcy-Weisbach / laminar closures only)
     k24_sliding_law                  = 0        ! 0=NO_FRICTION 1=WEERTMAN 2=POWER_PLASTIC 3=REG_COULOMB 4=PRESCRIBED_FIELD 5=REG_COULOMB_FIELD 6=SHAKTI_REG_COULOMB
 
     ! -- physical constants --
-    k24_manning_exponent             = 3.0      ! n, Glen's flow-law exponent
+    k24_glen_n                       = 3.0      ! n, Glen's flow-law exponent
     k24_latent_heat_water            = 3.34e5   ! L_w [J/kg]
-    k24_bed_thickness                = 0.1      ! h_b, bed obstacle height [m]
-    k24_manning_coefficient_exponent = 1.25     ! alpha = 5/4
-    k24_bed_friction_exponent        = 1.5      ! beta  = 3/2
+    k24_bed_bump_height              = 0.1      ! h_b, bed obstacle height [m]
+    k24_flux_W_exponent              = 1.25     ! alpha = 5/4
+    k24_flux_grad_exponent           = 1.5      ! beta  = 3/2
     k24_friction_factor              = 0.1      ! f, Darcy-Weisbach friction factor
     k24_till_factor                  = 1.1      ! F_till
     k24_critical_discharge           = 1.0      ! Q_c [m3/s]
-    k24_initial_cavity_height        = 0.1      ! H_0 [m]
-    k24_coupling_length              = 1.0e4    ! l_c, conduit spacing [m]
+    k24_H0_efficient                 = 0.1      ! H_0 [m]
+    k24_conduit_spacing              = 1.0e4    ! l_c, conduit spacing [m]
     k24_coupling_length_kamb86       = 0.0      ! Kamb & Echelmeyer (1986) coupling length / ice thickness; 0 disables the smoothing entirely.
                                                  ! GRL-16KM: the coupling length at the default 10
                                                  ! (10x mean ice thickness) is well under one grid  
@@ -73,7 +73,7 @@
                                                  ! explicitly re-normalizes this value back to 5.0 for
                                                  ! every synth case so the sweep's baseline config is
                                                  ! unaffected by this file's Greenland-specific value.
-    k24_eta_w                        = 5.703855806525211e-11 ! eta_w [Pa s] = 1.8e-3 per year
+    k24_water_viscosity              = 5.703855806525211e-11 ! water_viscosity [Pa s] = 1.8e-3 per year
 
     ! -- clamps. Julia's constructor leaves all of these OFF; KORI-ULB's own
     !    values are given in the comments if you want that fidelity back.
@@ -90,9 +90,9 @@
     k24_max_dissipation_iters        = 20       ! max_dissipation_iters
     k24_dissipation_rtol             = 1.0e-12  ! dissipation_rtol
     k24_dissipation_verbose          = True     ! dissipation_verbose
-    k24_max_coupling_iters           = 20       ! max_coupling_iters  (N-dependent sliding laws)
-    k24_coupling_rtol                = 1.0e-8   ! coupling_rtol
-    k24_coupling_verbose             = True     ! coupling_verbose
+    k24_max_qN_iters                 = 20       ! max_qN_iters        (N-dependent sliding laws)
+    k24_qN_rtol                      = 1.0e-8   ! qN_rtol
+    k24_qN_verbose                   = True     ! qN_verbose
 
     ! -- sliding-law parameters. Only the set belonging to k24_sliding_law is
     !    read; C / c_till are mandatory keywords in Julia and default to 0 here,
