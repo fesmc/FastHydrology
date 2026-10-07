@@ -31,7 +31,8 @@ program k24_compare
     real(wp_local), allocatable :: bmb_grnd(:,:), uxy_b(:,:), A_glen(:,:)
     real(wp_local), allocatable :: mdot(:,:), G(:,:), q_T(:,:), i_eb(:,:)
 
-    type(hydro_class) :: hyd
+    type(hydro_class) :: hyd, hyd_ext
+    real(wp_local), allocatable :: kappa_host(:,:)
     real(wp_local)    :: dx_km, dy_km
     integer           :: nx, ny
 
@@ -91,6 +92,28 @@ program k24_compare
     call hydro_init(hyd, nml_file, nx, ny, &
                     dx_km * 1000.0_wp_local, dy_km * 1000.0_wp_local)
     call hydro_init_state(hyd, H_ice, z_bed, f_ice, f_grnd, 0.0_wp_local)
+
+    ! Host-supplied kappa (k24_substrate_type = 4): handing back the kappa this
+    ! namelist built must reproduce it exactly, and out-of-range values clamp.
+    if (hyd%par%k24%substrate_type /= 4) then
+        call hydro_init(hyd_ext, nml_file, nx, ny, &
+                        dx_km * 1000.0_wp_local, dy_km * 1000.0_wp_local)
+        hyd_ext%par%k24%substrate_type = 4
+        call hydro_init_state(hyd_ext, H_ice, z_bed, f_ice, f_grnd, 0.0_wp_local, kappa=hyd%now%kappa)
+        if (any(hyd_ext%now%kappa /= hyd%now%kappa)) then
+            write(*,*) "k24_compare: FAIL: EXTERNAL kappa does not round-trip"
+            stop 1
+        end if
+        allocate(kappa_host(nx,ny))
+        kappa_host = 2.0_wp_local*hyd%now%kappa - 0.5_wp_local   ! spans [-0.5, 1.5]
+        call hydro_init_state(hyd_ext, H_ice, z_bed, f_ice, f_grnd, 0.0_wp_local, kappa=kappa_host)
+        if (minval(hyd_ext%now%kappa) < 0.0_wp_local .or. maxval(hyd_ext%now%kappa) > 1.0_wp_local) then
+            write(*,*) "k24_compare: FAIL: EXTERNAL kappa not clamped to [0,1]"
+            stop 1
+        end if
+        write(*,'(a)') "k24_compare: EXTERNAL kappa check ok"
+        deallocate(kappa_host)
+    end if
 
     write(*,'(a,i0,a,i0)') "k24_compare: grid ", nx, " x ", ny
     write(*,'(a,es14.6)') "  mdot_scale = ", mdot_scale
