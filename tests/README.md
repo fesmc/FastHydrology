@@ -134,7 +134,7 @@ materially above that is a regression. The configurations covered:
 | case | what it exercises |
 | --- | --- |
 | `hard_both` | baseline: hard bed, both drainage terms |
-| `soft_both`, `mixed_both` | the `kappa` hard/soft conduit blend |
+| `soft_both`, `mixed_both`, `mixed_smooth` | the `kappa` hard/soft conduit blend (`mixed_smooth`: linear ramp in `z_bed`) |
 | `soft_efficient`, `mixed_eff` | `EfficientOnly`: `Q_c -> 0`, sliding opening term dropped |
 | `soft_ineff`, `hard_ineff` | `InefficientOnly`: `Q_c -> Inf`, melt opening term dropped |
 | `laminar_mean`, `laminar_local` | the laminar `W` closure, both gradient conventions |

@@ -86,7 +86,9 @@ module fast_hydrology_k24
     ! ---------- Substrate-type enum (par%substrate_type) ----------
     integer, parameter, public :: K24_SUBSTRATE_HARD  = 0
     integer, parameter, public :: K24_SUBSTRATE_SOFT  = 1
-    integer, parameter, public :: K24_SUBSTRATE_MIXED = 2
+    integer, parameter, public :: K24_SUBSTRATE_MIXED = 2          ! binary: soft below z_bed = -1000 m
+    integer, parameter, public :: K24_SUBSTRATE_MIXED_SMOOTH = 3   ! linear ramp in z_bed (kappa_z_hard .. kappa_z_soft)
+    integer, parameter, public :: K24_SUBSTRATE_EXTERNAL = 4       ! kappa supplied by the host (hydro_init_state)
 
     ! ---------- Flow-routing algorithm enum (par%flux_solver) ----------
     ! Mirrors AbstractPsiOutAlgorithm in FastHydrology.jl/model.jl.
@@ -173,6 +175,8 @@ module fast_hydrology_k24
 
         ! -- mode selectors --
         integer  :: substrate_type              ! (Fortran-only; builds kappa)
+        real(dp) :: kappa_z_hard                ! MIXED_SMOOTH: z_bed at/above which the bed is hard (kappa = 0) [m]
+        real(dp) :: kappa_z_soft                ! MIXED_SMOOTH: z_bed at/below which the bed is soft (kappa = 1) [m]
         integer  :: flux_solver                 ! psi_out_algorithm
         integer  :: routing_scheme              ! routing_scheme
         logical  :: quinn_original              ! Quinn(original = ...)
@@ -339,6 +343,8 @@ contains
         if (present(skip_phys_const)) read_phys_const = .not. skip_phys_const
 
         par%substrate_type                = K24_SUBSTRATE_HARD
+        par%kappa_z_hard                  = -500.0_dp
+        par%kappa_z_soft                  = -1500.0_dp
         par%flux_solver                   = K24_FLUX_TAPED
         par%routing_scheme                = K24_ROUTE_WARNER
         par%quinn_original                = .FALSE.
@@ -415,6 +421,8 @@ contains
         par%periodic_y                    = .FALSE.
 
         call nml_read(filename,group,"k24_substrate_type",                par%substrate_type,                init=init_pars,defaults_file=def_file,defaults_group=def_group)
+        call nml_read(filename,group,"k24_kappa_z_hard",                  par%kappa_z_hard,                  init=init_pars,defaults_file=def_file,defaults_group=def_group)
+        call nml_read(filename,group,"k24_kappa_z_soft",                  par%kappa_z_soft,                  init=init_pars,defaults_file=def_file,defaults_group=def_group)
         call nml_read(filename,group,"k24_flux_solver",                   par%flux_solver,                   init=init_pars,defaults_file=def_file,defaults_group=def_group)
         call nml_read(filename,group,"k24_routing_scheme",                par%routing_scheme,                init=init_pars,defaults_file=def_file,defaults_group=def_group)
         call nml_read(filename,group,"k24_quinn_original",                par%quinn_original,                init=init_pars,defaults_file=def_file,defaults_group=def_group)
@@ -562,18 +570,29 @@ contains
     ! ============================================================
     ! Substrate indicator (one-time, called from hydro_init_state)
     ! ============================================================
-    subroutine initialize_kappa(kappa, b, substrate_type)
+    subroutine initialize_kappa(kappa, b, substrate_type, z_hard, z_soft)
+        ! kappa = 0 hard bed, 1 soft bed. MIXED_SMOOTH ramps linearly from
+        ! kappa = 0 at z_bed >= z_hard to kappa = 1 at z_bed <= z_soft
+        ! (defaults -500 / -1500 m, as FastHydrology.jl bed_rheology = :mixed_smooth).
+        ! EXTERNAL is not built here: the host supplies kappa (hydro_init_state).
 
         implicit none
 
         real(dp),   intent(OUT) :: kappa(:,:)
         real(dp),   intent(IN)  :: b(:,:)
         integer,    intent(IN)  :: substrate_type
+        real(dp),   intent(IN), optional :: z_hard, z_soft
 
-        integer :: i, j, nx, ny
+        integer  :: i, j, nx, ny
+        real(dp) :: zh, zs
 
         nx = size(kappa,1)
         ny = size(kappa,2)
+
+        zh = -500.0_dp
+        zs = -1500.0_dp
+        if (present(z_hard)) zh = z_hard
+        if (present(z_soft)) zs = z_soft
 
         select case (substrate_type)
             case (K24_SUBSTRATE_HARD)
@@ -592,8 +611,23 @@ contains
                     end do
                 end do
                 !$omp end parallel do
+            case (K24_SUBSTRATE_MIXED_SMOOTH)
+                if (.not. (zh > zs)) then
+                    write(*,*) "initialize_kappa:: error: MIXED_SMOOTH needs kappa_z_hard > kappa_z_soft."
+                    write(*,*) "kappa_z_hard, kappa_z_soft = ", zh, zs
+                    stop
+                end if
+                !$omp parallel do default(shared) private(i,j) schedule(static)
+                do j = 1, ny
+                    do i = 1, nx
+                        kappa(i,j) = min(1.0_dp, max(0.0_dp, (zh - b(i,j)) / (zh - zs)))
+                    end do
+                end do
+                !$omp end parallel do
+            case (K24_SUBSTRATE_EXTERNAL)
+                kappa = 0.0_dp
             case default
-                write(*,*) "initialize_kappa:: error: substrate_type must be one of [0,1,2]."
+                write(*,*) "initialize_kappa:: error: substrate_type must be one of [0,1,2,3,4]."
                 write(*,*) "substrate_type = ", substrate_type
                 stop
         end select
