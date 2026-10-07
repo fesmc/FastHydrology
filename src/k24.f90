@@ -623,10 +623,12 @@ contains
         ! Picard sweep.
         !
         ! `C_frz` (optional, [m/s ice equivalent]) is the freeze-on capacity
-        ! for the host's capacity basal boundary condition: the water routed
-        ! into each grounded cell from upstream, rho_w*Psi_in/(rho_i*dx*dy),
-        ! from the final routing. The cell's own source (melt, dissipation,
-        ! i_eb) is not in it: the host counts that heat in its demand.
+        ! for the host's capacity basal boundary condition: the water that
+        ! reaches each grounded cell, routed in from upstream (Psi_in, from the
+        ! final routing) plus the water from above i_eb,
+        ! (rho_w*Psi_in/(dx*dy) + i_eb)/rho_i. The cell's own melt and
+        ! dissipation are not in it: they are heat, which the host counts in
+        ! its freezing demand. i_eb is water and in no heat balance.
         ! Fortran-only for now.
         !
         ! Optional inputs needed by some options only:
@@ -765,7 +767,7 @@ contains
             ! only filled when face fluxes need it.
             if (par%routing_scheme == K24_ROUTE_GDS_WARNER .and. .not. needs_face_fluxes(par)) &
                 call compute_routing_weights(wk, mask, dx, dy, par)
-            call calc_capacity(C_frz, wk, mask, dx, dy, par)
+            call calc_capacity(C_frz, wk, mask, i_eb, dx, dy, par)
         end if
 
         if (present(gsx_out))   gsx_out   = wk%gsx
@@ -808,23 +810,27 @@ contains
 
     end subroutine k24_N_from_ub
 
-    subroutine calc_capacity(C_frz, wk, mask, dx, dy, par)
+    subroutine calc_capacity(C_frz, wk, mask, i_eb, dx, dy, par)
         ! Freeze-on capacity [m/s ice equivalent] of each grounded cell: the
-        ! inflow Psi_in = sum over neighbours n of psi_out(n) times the
-        ! fraction of its outflow sent toward the cell,
-        ! C = rho_w*Psi_in/(rho_i*dx*dy).
+        ! water that reaches it, i.e. the inflow Psi_in = sum over neighbours n
+        ! of psi_out(n) times the fraction of its outflow sent toward the cell,
+        ! plus the water from above i_eb [kg/m2/s],
+        ! C = (rho_w*Psi_in/(dx*dy) + i_eb)/rho_i.
+        ! The cell's own melt and dissipation are heat, already in the host's
+        ! freezing demand, so they are left out; i_eb is water, not heat.
         implicit none
         real(dp),             intent(OUT) :: C_frz(:,:)
         type(k24_work_class), intent(IN)  :: wk
-        real(dp),             intent(IN)  :: mask(:,:), dx, dy
+        real(dp),             intent(IN)  :: mask(:,:), i_eb(:,:), dx, dy
         type(k24_param_class),intent(IN)  :: par
         integer  :: i, j, d, ni, nj
-        real(dp) :: psi_in
+        real(dp) :: psi_in, supply
 
-        !$omp parallel do default(shared) private(i,j,d,ni,nj,psi_in) schedule(static)
+        !$omp parallel do default(shared) private(i,j,d,ni,nj,psi_in,supply) schedule(static)
         do j = 1, wk%ny
             do i = 1, wk%nx
                 psi_in = 0.0_dp
+                supply = 0.0_dp
                 if (mask(i,j) == 1.0_dp) then
                     do d = 1, par%n_dirs
                         ni = wrap_index(i + K24_DIRS(1,d), wk%nx, par%periodic_x)
@@ -834,8 +840,9 @@ contains
                         ! The neighbour sends toward (i,j) in the direction opposite to d.
                         psi_in = psi_in + wk%psi_out(ni,nj) * wk%w8(K24_OPPOSITE(d),ni,nj)
                     end do
+                    supply = par%water_density * psi_in / (dx * dy) + i_eb(i,j)
                 end if
-                C_frz(i,j) = par%water_density * max(psi_in, 0.0_dp) / (par%ice_density * dx * dy)
+                C_frz(i,j) = max(supply, 0.0_dp) / par%ice_density
             end do
         end do
         !$omp end parallel do
