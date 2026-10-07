@@ -14,3 +14,4 @@ fesm-utils
 # fragments + config/common.mk. Do not commit. Root-only (leading slash)
 # so the template at config/Makefile remains trackable.
 /Makefile
+logs/

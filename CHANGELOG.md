@@ -4,6 +4,12 @@ All notable changes to FastHydrology are documented here.
 Format follows [Keep a Changelog](https://keepachangelog.com/); versioning is [SemVer](https://semver.org/).
 
 ## [Unreleased]
+### Added
+- K24 bed hardness `kappa` (fesmc/FastHydrology#7): `k24_substrate_type = 3` (MIXED_SMOOTH)
+  ramps kappa linearly in `z_bed` from 0 at `k24_kappa_z_hard` (default -500 m) to 1 at
+  `k24_kappa_z_soft` (default -1500 m), as FastHydrology.jl `bed_rheology = :mixed_smooth`.
+  `k24_substrate_type = 4` (EXTERNAL) takes kappa from the host through the new optional
+  `kappa` argument of `hydro_init_state` (clamped to [0,1]; required for type 4).
 ### Changed
 - K24 namelist parameters renamed (fesmc/FastHydrology#14), in step with the
   FastHydrology.jl constructor keywords. Old names are no longer read, so host namelists

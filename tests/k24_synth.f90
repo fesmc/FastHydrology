@@ -105,7 +105,7 @@ program k24_synth
     taub   = 2.0e4_dp + uxy_b * 1.0e10_dp
     c_till = par%reg_coulomb_c_till * (1.0_dp + uxy_b * 1.0e5_dp)
 
-    call initialize_kappa(kappa, b, par%substrate_type)
+    call initialize_kappa(kappa, b, par%substrate_type, par%kappa_z_hard, par%kappa_z_soft)
 
     q = 0.0_dp
     N = 0.0_dp

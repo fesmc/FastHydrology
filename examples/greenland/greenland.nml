@@ -40,7 +40,9 @@
     ! each key maps to is named in the trailing comment.
 
     ! -- mode selectors --
-    k24_substrate_type               = 0        ! 0=HARD 1=SOFT 2=MIXED (Fortran-only; builds kappa)
+    k24_substrate_type               = 0        ! 0=HARD 1=SOFT 2=MIXED (binary, z_bed<-1000) 3=MIXED_SMOOTH (ramp) 4=EXTERNAL (host passes kappa to hydro_init_state) (Fortran-only; builds kappa)
+    k24_kappa_z_hard                 = -500.0   ! MIXED_SMOOTH: z_bed at/above which the bed is hard, kappa = 0 [m]
+    k24_kappa_z_soft                 = -1500.0  ! MIXED_SMOOTH: z_bed at/below which the bed is soft, kappa = 1 [m]
     k24_flux_solver                  = 3        ! psi_out_algorithm: 0=RECURSIVE 1=ITERATIVE 2=TOPOSORT
     k24_toposort_allow_cycles        = False    ! TopologicalPsiOut(allow_cycles=...)
     k24_N_ub_coupled                 = True     ! host velocity iteration re-evaluates N from u_b (hydro_N_from_ub); False = N once per host step
