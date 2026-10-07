@@ -36,7 +36,7 @@ run_case () {
     cp "$NML_SRC" "$nml"
     # keep the per-iteration Picard chatter out of the log
     sed_i 's/^    k24_dissipation_verbose          = True/    k24_dissipation_verbose          = False/;
-            s/^    k24_coupling_verbose             = True/    k24_coupling_verbose             = False/' "$nml"
+            s/^    k24_qN_verbose                   = True/    k24_qN_verbose                   = False/' "$nml"
     # NML_SRC (par/k24_greenland.nml) sets k24_coupling_length_kamb86 = 0.0, correct for its own
     # 16 km grid but not for SYNTH's much finer dx=2000/dy=3000 (k24_synth_gen.jl). Re-normalize
     # to the model's default 10.0 so this file's Greenland-specific value doesn't silently change
