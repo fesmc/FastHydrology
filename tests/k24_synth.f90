@@ -19,8 +19,10 @@ program k24_synth
     ! tau_b = 2e4 + 1e10*vb, c_till = reg_coulomb_c_till*(1 + 1e5*vb).
     !
     ! usage: k24_synth.x <namelist> <out.nc> [input.nc] [key=value ...]
-    !   keys read here: qtfrac=<float> iebfrac=<float> (default 0); every
-    !   other key=value (the Julia twin's options) is ignored.
+    !   keys read here: qtfrac=<float> iebfrac=<float> (default 0);
+    !   ubfac=<float>: also write N_ub, N for the sliding speed ubfac*vb with the routing of
+    !   the solve above held (k24_N_from_ub); every other key=value (the Julia twin's options)
+    !   is ignored.
 
     use nml
     use ncio
@@ -34,7 +36,8 @@ program k24_synth
 
     character(len=256) :: nml_file, out_file, in_file, arg
 
-    real(dp) :: dx, dy, qtfrac, iebfrac
+    real(dp) :: dx, dy, qtfrac, iebfrac, ubfac
+    real(dp), allocatable :: N_ub(:,:), uxy_b_new(:,:)
     real(dp), allocatable :: h(:,:), b(:,:), mask(:,:), mdot(:,:)
     real(dp), allocatable :: uxy_b(:,:), A_glen(:,:), kappa(:,:)
     real(dp), allocatable :: G(:,:), q_T(:,:), i_eb(:,:), ux_b(:,:), uy_b(:,:), taub(:,:), c_till(:,:)
@@ -49,6 +52,7 @@ program k24_synth
     in_file = "tests/k24_synth_input.nc"
     qtfrac  = 0.0_dp
     iebfrac = 0.0_dp
+    ubfac   = -1.0_dp
     nargs = command_argument_count()
     do ia = 3, nargs
         call get_command_argument(ia, arg)
@@ -59,6 +63,7 @@ program k24_synth
         end if
         if (arg(1:ieq-1) == "qtfrac")  read(arg(ieq+1:), *) qtfrac
         if (arg(1:ieq-1) == "iebfrac") read(arg(ieq+1:), *) iebfrac
+        if (arg(1:ieq-1) == "ubfac")   read(arg(ieq+1:), *) ubfac
     end do
 
     call k24_par_load(par, nml_file, "yhyd")
@@ -110,6 +115,15 @@ program k24_synth
                   ux_b=ux_b, uy_b=uy_b, tau_b_in=taub, c_till_in=c_till, C_frz=C_frz, &
                   gsx_out=gsx, gsy_out=gsy, absgs_out=absgs, absg_out=absg, phi0_out=phi0)
 
+    ! N for a new sliding speed with the routing (q, absg, phi0) held, as a host's velocity
+    ! iteration calls it
+    if (ubfac >= 0.0_dp) then
+        allocate(N_ub(nx,ny), uxy_b_new(nx,ny))
+        N_ub = N
+        uxy_b_new = ubfac * uxy_b
+        call k24_N_from_ub(N_ub, q, absg, phi0, mask, uxy_b_new, A_glen, kappa, h, par)
+    end if
+
     call nc_create(out_file)
     call nc_write_dim(out_file, "xc", x=xc, units="m")
     call nc_write_dim(out_file, "yc", x=yc, units="m")
@@ -126,6 +140,7 @@ program k24_synth
     call nc_write(out_file, "absgs",  absgs,  dim1="xc", dim2="yc")
     call nc_write(out_file, "absg",   absg,   dim1="xc", dim2="yc")
     call nc_write(out_file, "phi0",   phi0,   dim1="xc", dim2="yc")
+    if (allocated(N_ub)) call nc_write(out_file, "N_ub", N_ub, dim1="xc", dim2="yc")
 
     write(*,'(a,i0,a,i0,a,f9.2,a,f9.2)') "k24_synth: ", nx, " x ", ny, "  dx=", dx, " dy=", dy
     write(*,'(a,a)') "k24_synth: wrote ", trim(out_file)

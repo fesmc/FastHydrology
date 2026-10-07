@@ -10,6 +10,7 @@
 #   psi=taped|recursive|iterative|topological  dissip=true|false
 #   sliding=none|weertman|powerplastic|regcoulomb|field|regcoulombfield|shakti  ctill=<float>
 #   qtfrac=<float>  iebfrac=<float>  report=0|1  maxpsi=<int>  filliters=<int>  input=<path>
+#   ubfac=<float>  also write N_ub: N for the sliding speed ubfac*vb, routing held (N_from_ub!)
 #
 # Every option must be matched by the corresponding k24_* key in the namelist
 # given to k24_synth.x (qtfrac/iebfrac are passed to it as arguments) -- an
@@ -146,6 +147,12 @@ model = KazmierczakHydroModel(grid, kappa, vb, A, G, q_T;
 state = HydroState(grid, mask, h, b)
 FastHydrology.run!(SteadyStateSimulation(model, grid, state))
 
+# N for a new sliding speed with the routing held, as a host's velocity iteration calls it
+ubfac = parse(Float64, get_cfg("ubfac", "-1.0"))
+N_main = copy(Array(state.N))   # N_from_ub! overwrites state.N
+N_ub = ubfac >= 0 ? copy(Array(N_from_ub!(model, grid, state, ubfac .* vb))) : nothing
+state.N .= N_main   # the output N is the solve's own
+
 if get_cfg("report", "0") == "1"
     mk   = Bool.(mask .== 1)
     Ninf = Array(model.N_inf)[mk]; Po = Array(model.Po)[mk]; S = Array(model.S_inf)[mk]
@@ -174,5 +181,6 @@ NCDataset(out_path, "c") do out
     defVar(out, "absgs",  Array(model.abs_grad_phi0_s),    ("xc", "yc"))
     defVar(out, "absg",   Array(model.abs_grad_phi0),      ("xc", "yc"))
     defVar(out, "phi0",   Array(model.phi0),               ("xc", "yc"))
+    N_ub === nothing || defVar(out, "N_ub", N_ub, ("xc", "yc"))
 end
 println("wrote $out_path")
