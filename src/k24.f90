@@ -188,6 +188,7 @@ module fast_hydrology_k24
         integer  :: gradient_convention         ! DarcyWeisbach/Laminar gradient_convention
         integer  :: sliding_law                 ! sliding_law
         logical  :: toposort_allow_cycles       ! TopologicalPsiOut.allow_cycles
+        logical  :: ub_hook                     ! (Fortran-only) host re-evaluates N from its sliding speed inside its velocity iteration (hydro_N_from_ub)
 
         ! -- physical constants (water/ice/gravity come from the top level) --
         real(dp) :: water_density               ! rho_w  [kg/m3]
@@ -354,6 +355,7 @@ contains
         par%gradient_convention           = K24_GRAD_MEAN
         par%sliding_law                   = K24_SLIDING_NO_FRICTION
         par%toposort_allow_cycles         = .FALSE.
+        par%ub_hook                       = .TRUE.
 
         par%water_density                 = 1000.0_dp
         par%ice_density                   =  917.0_dp
@@ -428,6 +430,7 @@ contains
         call nml_read(filename,group,"k24_gradient_convention",           par%gradient_convention,           init=init_pars,defaults_file=def_file,defaults_group=def_group)
         call nml_read(filename,group,"k24_sliding_law",                   par%sliding_law,                   init=init_pars,defaults_file=def_file,defaults_group=def_group)
         call nml_read(filename,group,"k24_toposort_allow_cycles",         par%toposort_allow_cycles,         init=init_pars,defaults_file=def_file,defaults_group=def_group)
+        call nml_read(filename,group,"k24_ub_hook",                       par%ub_hook,                       init=init_pars,defaults_file=def_file,defaults_group=def_group)
         ! water_density, ice_density, gravity are set from top-level
         ! rho_w / rho_ice / g in hydro_par_load (single source of truth).
         call nml_read(filename,group,"k24_manning_exponent",              par%manning_exponent,              init=init_pars,defaults_file=def_file,defaults_group=def_group)
