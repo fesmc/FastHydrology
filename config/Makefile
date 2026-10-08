@@ -86,12 +86,16 @@ $(objdir)/fast_hydrology.o : $(srcdir)/fast_hydrology.f90 \
 
 all: fasthydro-static
 
-fasthydro-static: $(fasthydro_objs)
+fasthydro-static: $(libdir)/libfasthydro.a
+
+# File target, so the archive mtime only changes when an object does
+# (hosts such as yelmo depend on it to rebuild after a type change).
+$(libdir)/libfasthydro.a: $(fasthydro_objs)
 	@mkdir -p $(libdir)
-	ar rc $(libdir)/libfasthydro.a $(fasthydro_objs)
-	ranlib $(libdir)/libfasthydro.a
+	ar rc $@ $(fasthydro_objs)
+	ranlib $@
 	@echo ""
-	@echo "    $(libdir)/libfasthydro.a is ready."
+	@echo "    $@ is ready."
 	@echo ""
 
 shmip: fasthydro-static
