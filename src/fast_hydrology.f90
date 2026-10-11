@@ -501,8 +501,11 @@ contains
                     call apply_margin_fill(hyd%now%W_til, f_ice, f_grnd, hyd%now%W_til_max, &
                                            hyd%par%periodic_x, hyd%par%periodic_y)
 
+                case (FLOATING_SATURATED)
+                    call apply_floating_saturated(hyd%now%W_til, f_ice, f_grnd, hyd%now%W_til_max)
+
                 case default
-                    write(*,*) "hydro_update:: error: bkt_floating_mode must be 0 (ZERO) or 1 (MARGIN_FILL)."
+                    write(*,*) "hydro_update:: error: bkt_floating_mode must be 0 (ZERO), 1 (MARGIN_FILL) or 2 (SATURATED)."
                     write(*,*) "floating_mode = ", hyd%par%bucket%floating_mode
                     stop
 

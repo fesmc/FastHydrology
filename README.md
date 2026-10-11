@@ -36,6 +36,11 @@ follows van Pelt & Bueler 2015:
 - `G`, `q_T` : geothermal heat into the bed, conductive heat into the ice [W/m2]
 - `i_eb`  : water reaching the bed from above [m/s, water-equivalent]
 
+On floating and ocean cells (`f_grnd == 0`) the bucket holds no water of its own;
+`bkt_floating_mode` sets what `W_til` is there: 0 (ZERO) dry, 1 (MARGIN_FILL)
+saturated plus a saturated ring of grounded cells next to floating ice (legacy),
+2 (SATURATED, default) saturated, so ice that grounds starts from saturated till.
+
 All internal units are SI. The public API takes `time` in years, as
 `real(dp)` (matching typical ice-sheet model conventions); namelist
 `bkt_till_rate` is in m/a (converted at load time). Output diagnostics (`dW_til_dt`, `overflow`,

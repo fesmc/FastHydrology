@@ -11,6 +11,13 @@ Format follows [Keep a Changelog](https://keepachangelog.com/); versioning is [S
   `k24_substrate_type = 4` (EXTERNAL) takes kappa from the host through the new optional
   `kappa` argument of `hydro_init_state` (clamped to [0,1]; required for type 4).
 ### Changed
+- New `bkt_floating_mode = 2` (SATURATED), now the default (`input/yelmo_defaults.nml`, code
+  fallback, `par/*.nml`, `examples/greenland`): floating and ocean cells (`f_grnd == 0`) get
+  `W_til = W_til_max`, grounded ice-free cells 0, grounded ice keeps its bucket value; no
+  grounded margin ring as in MARGIN_FILL (1). Under ZERO (0) ice that re-grounded onto dry till
+  jumped from N = 0 to the full overburden in one step with the till closure, so the grounding
+  line flipped grounded/floating every step (Yelmo TROUGH-F17 `cf_ref = 5`, killed by `dt_min`).
+  `input/yelmo_defaults.nml` still had 1 from before the 1 -> 0 change below.
 - Model time in double precision: the `time` argument of `hydro_init_state` and
   `hydro_update` and `hyd%now%time` are `real(dp)`, so the step `dt` stays exact at
   large |time| (e.g. -150 kyr). Hosts must pass `real(dp)` time.
