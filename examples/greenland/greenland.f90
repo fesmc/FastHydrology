@@ -12,6 +12,7 @@ program greenland
     implicit none
 
     integer, parameter :: wp_local = kind(1.0)
+    integer, parameter :: dp = kind(1.d0)
 
     character(len=256) :: nml_file
     character(len=256) :: restart_file, out_file
@@ -84,7 +85,7 @@ program greenland
     ! ---- Initialize library ----
     call hydro_init(hyd, nml_file, nx, ny, &
                     dx_km * 1000.0_wp_local, dy_km * 1000.0_wp_local)
-    call hydro_init_state(hyd, H_ice, z_bed, f_ice, f_grnd, 0.0_wp_local)
+    call hydro_init_state(hyd, H_ice, z_bed, f_ice, f_grnd, 0.0_dp)
 
     ! Convert bmb_grnd (ice-equivalent m/a, sign convention: positive =
     ! accumulation) to a water-equivalent source rate (m/s, SI) for the
@@ -126,7 +127,7 @@ program greenland
         time   = time + dt_step
         n_step = n_step + 1
         call hydro_update(hyd, H_ice, z_bed, z_sl, f_ice, f_grnd, mask, &
-                          mdot, G, q_T, i_eb, uxy_b, A_glen, time)
+                          mdot, G, q_T, i_eb, uxy_b, A_glen, real(time,dp))
 
         if (mod(n_step, n_out) == 0 .or. time >= t_end) then
             i_out = i_out + 1

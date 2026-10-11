@@ -36,9 +36,19 @@ follows van Pelt & Bueler 2015:
 - `G`, `q_T` : geothermal heat into the bed, conductive heat into the ice [W/m2]
 - `i_eb`  : water reaching the bed from above [m/s, water-equivalent]
 
-All internal units are SI. The public API takes `time` in years (matching
-typical ice-sheet model conventions); namelist `bkt_till_rate` is in m/a
-(converted at load time). Output diagnostics (`dW_til_dt`, `overflow`,
+On floating and ocean cells (`f_grnd == 0`) the bucket holds no water of its own;
+`bkt_floating_mode` sets what `W_til` is there: 0 (ZERO) dry, 1 (MARGIN_FILL)
+saturated plus a saturated ring of grounded cells next to floating ice (legacy),
+2 (SATURATED, default) saturated, so ice that grounds starts from saturated till.
+The till closure (`bkt_N_closure = 3`) is capped at `N_marine/till_delta`, with
+`N_marine = rho_ice g H - rho_sw g max(z_sl - z_bed, 0)` the marine closure for full
+ocean connectivity (`p = 1`), so `N` goes to 0 continuously as grounded ice approaches
+flotation. The cap binds only where `N_marine < till_delta * N_till`, i.e. within a
+height above flotation of `till_delta * H` at most.
+
+All internal units are SI. The public API takes `time` in years, as
+`real(dp)` (matching typical ice-sheet model conventions); namelist
+`bkt_till_rate` is in m/a (converted at load time). Output diagnostics (`dW_til_dt`, `overflow`,
 `q_x`, `q_y`) are in SI. The grid spacing pair `(dx, dy)` is carried
 throughout — no isotropic-grid assumption.
 
@@ -125,6 +135,12 @@ Deliberate deviations:
   them; this library takes the same limits by an explicit branch instead, since
   it is built with `-Ofast` where `Inf`/`NaN` propagation is not dependable.
   Each such site is marked `DEVIATION:` in `src/k24.f90`.
+- **Sea level.** The hydraulic potential takes the bed elevation relative to
+  sea level, `phi0 = rho_i g H + rho_w g (z_bed - z_sl)` (`calc_k24`'s `z_sl`),
+  so its value at flotation, `(rho_sw - rho_w) g (z_sl - z_bed)`, and with it
+  `N` near the grounding line do not depend on `z_sl`. FastHydrology.jl has no
+  sea level; `z_sl = 0` is identical to it, and a uniform `z_sl` leaves the
+  routing unchanged.
 
 Four clamps that KORI-ULB applies are **off by default**, matching the
 reference constructor: `k24_W_min`, `k24_W_max`, `k24_min_pressure_fraction`

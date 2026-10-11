@@ -66,6 +66,14 @@ module fast_hydrology_k24
     !      Julia keeps in model.routing_tape between solves is passed in and out
     !      through the optional `diss_io` argument instead (hydro_update keeps
     !      it in hyd%now%diss_face).
+    !   6. The hydraulic potential is referenced to sea level: the bed
+    !      elevation in phi0 = rho_i g H + rho_w g b is b = z_bed - z_sl
+    !      (calc_k24's z_sl argument), not the absolute z_bed. N depends on
+    !      phi0 itself (N_inf erf term), and with the absolute bed the value at
+    !      flotation, rho_sw g (z_sl - z_bed) + rho_w g z_bed, shifted with z_sl;
+    !      referenced to sea level it is (rho_sw - rho_w) g (z_sl - z_bed) for
+    !      any z_sl. A uniform z_sl only shifts phi0 by a constant, so the
+    !      routing is unchanged, and z_sl = 0 reproduces Julia exactly.
 
     use nml
     use phys_constants, only : sec_year_julian
@@ -640,7 +648,7 @@ contains
     ! Main entry point
     ! ============================================================
     subroutine calc_k24(q_x, q_y, N, p_w, W, q, Q_b, Q_diss, &
-                        H_ice, z_bed, mask, G, q_T, i_eb, uxy_b, A_glen, kappa, &
+                        H_ice, z_bed, z_sl, mask, G, q_T, i_eb, uxy_b, A_glen, kappa, &
                         dx, dy, par, ux_b, uy_b, tau_b_in, c_till_in, diss_io, C_frz, &
                         gsx_out, gsy_out, absgs_out, absg_out, phi0_out)
         ! Mirrors update_steady_state! (FastHydrology.jl/.../run.jl):
@@ -686,6 +694,7 @@ contains
         real(dp), intent(OUT)   :: Q_diss(:,:)          ! dissipation heat [W/m2]
         real(dp), intent(IN)    :: H_ice(:,:)           ! [m]
         real(dp), intent(IN)    :: z_bed(:,:)           ! [m]
+        real(dp), intent(IN)    :: z_sl(:,:)            ! [m] sea level (potential reference, deviation 6)
         real(dp), intent(IN)    :: mask(:,:)            ! 1 on grounded ice, else 0
         real(dp), intent(IN)    :: G(:,:)               ! geothermal heat flux into the bed [W/m2]
         real(dp), intent(IN)    :: q_T(:,:)             ! conductive heat flux from the bed into the ice [W/m2]
@@ -702,6 +711,7 @@ contains
         real(dp), intent(OUT),   optional :: absg_out(:,:), phi0_out(:,:)
 
         type(k24_work_class) :: wk
+        real(dp), allocatable :: b_sl(:,:)
         integer  :: nx, ny, i, j
         real(dp) :: gmag, epsT
 
@@ -742,11 +752,18 @@ contains
 
         ! ================= update_q! =================
 
+        ! DEVIATION 6: the potential takes the bed elevation relative to sea
+        ! level, b = z_bed - z_sl (b = z_bed for z_sl = 0, as in Julia).
+        allocate(b_sl(nx,ny))
+        b_sl = z_bed - z_sl
+
         ! True geometric potential from the RAW ice thickness.
-        call update_phi0(wk%phi0, H_ice, z_bed, par)
+        call update_phi0(wk%phi0, H_ice, b_sl, par)
 
         ! Routing potential and flow directions (prepare_routing!, routing.jl).
-        call prepare_routing(wk, H_ice, z_bed, mask, dx, dy, par)
+        call prepare_routing(wk, H_ice, b_sl, mask, dx, dy, par)
+
+        deallocate(b_sl)
 
         ! Correction factor from psi_out to q. Depends only on the routing
         ! directions, so it is fixed for the whole Picard loop below.
@@ -1045,6 +1062,8 @@ contains
     ! Hydraulic potential
     ! ============================================================
     subroutine update_phi0(phi0, h, b, par)
+        ! phi0 = rho_i g h + rho_w g b, with b the bed elevation relative to
+        ! sea level (deviation 6).
         implicit none
         real(dp), intent(OUT) :: phi0(:,:)
         real(dp), intent(IN)  :: h(:,:), b(:,:)
@@ -1072,7 +1091,7 @@ contains
         ! MODIFIED_TARBOTON): smooth the potential itself with the same
         ! kernel, then fill it; gsx/gsy then hold the unsmoothed gradient of
         ! that surface. abs_g (N, dissipation) is always the gradient of the
-        ! TRUE potential.
+        ! TRUE potential. z_bed is relative to sea level (deviation 6).
         implicit none
         type(k24_work_class), intent(INOUT) :: wk
         real(dp),             intent(IN)    :: H_ice(:,:), z_bed(:,:), mask(:,:), dx, dy

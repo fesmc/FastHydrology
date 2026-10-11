@@ -31,7 +31,7 @@ module fast_hydrology
     !           (drained englacial water, surface input) [m/s, water-equivalent]
     !
     ! Time / unit convention on the public API:
-    !   hydro_update(... time, ...) : time in YEARS (matches host model)
+    !   hydro_update(... time, ...) : time in YEARS (matches host model), real(dp)
     !   mdot, i_eb, uxy_b, ux_b, uy_b : SI [m/s];  G, q_T : [W/m2]
     !   par%dx, par%dy              : [m]
     ! Internally everything is SI. dt_year (time - hyd%now%time) is computed
@@ -90,7 +90,7 @@ module fast_hydrology
     end type
 
     type hydro_state_class
-        real(wp) :: time
+        real(dp) :: time                           ! [a] time of the last update
         real(wp) :: dt
         logical  :: initialized
         real(wp), allocatable :: W_til(:,:)        ! [m]      till storage (bucket)
@@ -186,7 +186,7 @@ contains
 
         call hydro_allocate(hyd%now, nx, ny)
 
-        hyd%now%time        = 0.0_wp
+        hyd%now%time        = 0.0_dp
         hyd%now%dt          = 0.0_wp
         hyd%now%initialized = .false.
 
@@ -216,7 +216,7 @@ contains
         real(wp),          intent(IN)           :: z_bed(:,:)
         real(wp),          intent(IN)           :: f_ice(:,:)
         real(wp),          intent(IN)           :: f_grnd(:,:)
-        real(wp),          intent(IN)           :: time
+        real(dp),          intent(IN)           :: time
         real(wp),          intent(IN), optional :: W_til(:,:)
         real(wp),          intent(IN), optional :: W(:,:)
         real(wp),          intent(IN), optional :: kappa(:,:)
@@ -335,11 +335,11 @@ contains
         real(wp),          intent(IN)    :: i_eb(:,:)
         real(wp),          intent(IN)    :: uxy_b(:,:)
         real(wp),          intent(IN)    :: A_glen(:,:)
-        real(wp),          intent(IN)    :: time
+        real(dp),          intent(IN)    :: time
         real(wp),          intent(IN), optional :: ux_b(:,:), uy_b(:,:), taub(:,:), c_till(:,:)
 
         ! dp scratch arrays for the K24 boundary
-        real(dp), allocatable :: H_ice_dp(:,:), z_bed_dp(:,:), mask_dp(:,:)
+        real(dp), allocatable :: H_ice_dp(:,:), z_bed_dp(:,:), z_sl_dp(:,:), mask_dp(:,:)
         real(dp), allocatable :: G_dp(:,:), q_T_dp(:,:), i_eb_dp(:,:), uxy_b_dp(:,:), A_glen_dp(:,:)
         real(dp), allocatable :: ux_b_dp(:,:), uy_b_dp(:,:), taub_dp(:,:), c_till_dp(:,:)
         real(dp), allocatable :: Q_b_dp(:,:), Q_diss_dp(:,:), C_frz_dp(:,:)
@@ -363,7 +363,7 @@ contains
         W_til_old = hyd%now%W_til
 
         ! API time is in years; convert step to seconds for internal SI.
-        dt_year      = max(time - hyd%now%time, 0.0_wp)
+        dt_year      = real(max(time - hyd%now%time, 0.0_dp), wp)
         dt_sec       = dt_year * hyd%par%sec_year
         hyd%now%time = time
         hyd%now%dt   = dt_sec
@@ -403,7 +403,7 @@ contains
 
             case (TRANSPORT_K24)
                 if (dt_sec > 0.0_wp) then
-                    allocate(H_ice_dp(nx,ny), z_bed_dp(nx,ny), mask_dp(nx,ny))
+                    allocate(H_ice_dp(nx,ny), z_bed_dp(nx,ny), z_sl_dp(nx,ny), mask_dp(nx,ny))
                     allocate(G_dp(nx,ny), q_T_dp(nx,ny), i_eb_dp(nx,ny), uxy_b_dp(nx,ny), A_glen_dp(nx,ny))
                     allocate(ux_b_dp(nx,ny), uy_b_dp(nx,ny), taub_dp(nx,ny), c_till_dp(nx,ny))
                     allocate(Q_b_dp(nx,ny), Q_diss_dp(nx,ny), C_frz_dp(nx,ny))
@@ -413,6 +413,7 @@ contains
 
                     H_ice_dp  = real(H_ice,           dp)
                     z_bed_dp  = real(z_bed,           dp)
+                    z_sl_dp   = real(z_sl,            dp)
                     mask_dp   = real(mask,            dp)
                     G_dp      = real(G,               dp)
                     q_T_dp    = real(q_T,             dp)
@@ -438,20 +439,20 @@ contains
                     ! that is missing.
                     if (present(ux_b) .and. present(uy_b) .and. present(taub) .and. present(c_till)) then
                         call calc_k24(q_x_dp, q_y_dp, N_dp, p_w_dp, W_dp, q_dp, Q_b_dp, Q_diss_dp, &
-                                      H_ice_dp, z_bed_dp, mask_dp, G_dp, q_T_dp, i_eb_dp, uxy_b_dp, A_glen_dp, &
+                                      H_ice_dp, z_bed_dp, z_sl_dp, mask_dp, G_dp, q_T_dp, i_eb_dp, uxy_b_dp, A_glen_dp, &
                                       kappa_dp, real(hyd%par%dx, dp), real(hyd%par%dy, dp), hyd%par%k24, &
                                       ux_b=ux_b_dp, uy_b=uy_b_dp, tau_b_in=taub_dp, c_till_in=c_till_dp, &
                                       diss_io=hyd%now%diss_face, C_frz=C_frz_dp, &
                                       absg_out=hyd%now%k24_abs_g, phi0_out=hyd%now%k24_phi0)
                     else if (present(ux_b) .and. present(uy_b)) then
                         call calc_k24(q_x_dp, q_y_dp, N_dp, p_w_dp, W_dp, q_dp, Q_b_dp, Q_diss_dp, &
-                                      H_ice_dp, z_bed_dp, mask_dp, G_dp, q_T_dp, i_eb_dp, uxy_b_dp, A_glen_dp, &
+                                      H_ice_dp, z_bed_dp, z_sl_dp, mask_dp, G_dp, q_T_dp, i_eb_dp, uxy_b_dp, A_glen_dp, &
                                       kappa_dp, real(hyd%par%dx, dp), real(hyd%par%dy, dp), hyd%par%k24, &
                                       ux_b=ux_b_dp, uy_b=uy_b_dp, diss_io=hyd%now%diss_face, C_frz=C_frz_dp, &
                                       absg_out=hyd%now%k24_abs_g, phi0_out=hyd%now%k24_phi0)
                     else
                         call calc_k24(q_x_dp, q_y_dp, N_dp, p_w_dp, W_dp, q_dp, Q_b_dp, Q_diss_dp, &
-                                      H_ice_dp, z_bed_dp, mask_dp, G_dp, q_T_dp, i_eb_dp, uxy_b_dp, A_glen_dp, &
+                                      H_ice_dp, z_bed_dp, z_sl_dp, mask_dp, G_dp, q_T_dp, i_eb_dp, uxy_b_dp, A_glen_dp, &
                                       kappa_dp, real(hyd%par%dx, dp), real(hyd%par%dy, dp), hyd%par%k24, &
                                       diss_io=hyd%now%diss_face, C_frz=C_frz_dp, &
                                       absg_out=hyd%now%k24_abs_g, phi0_out=hyd%now%k24_phi0)
@@ -468,7 +469,7 @@ contains
                     hyd%now%C_frz  = real(C_frz_dp,  wp)
                     hyd%now%k24_routed = .true.
 
-                    deallocate(H_ice_dp, z_bed_dp, mask_dp)
+                    deallocate(H_ice_dp, z_bed_dp, z_sl_dp, mask_dp)
                     deallocate(G_dp, q_T_dp, i_eb_dp, uxy_b_dp, A_glen_dp)
                     deallocate(ux_b_dp, uy_b_dp, taub_dp, c_till_dp, Q_b_dp, Q_diss_dp, C_frz_dp)
                     deallocate(kappa_dp)
@@ -501,8 +502,11 @@ contains
                     call apply_margin_fill(hyd%now%W_til, f_ice, f_grnd, hyd%now%W_til_max, &
                                            hyd%par%periodic_x, hyd%par%periodic_y)
 
+                case (FLOATING_SATURATED)
+                    call apply_floating_saturated(hyd%now%W_til, f_ice, f_grnd, hyd%now%W_til_max)
+
                 case default
-                    write(*,*) "hydro_update:: error: bkt_floating_mode must be 0 (ZERO) or 1 (MARGIN_FILL)."
+                    write(*,*) "hydro_update:: error: bkt_floating_mode must be 0 (ZERO), 1 (MARGIN_FILL) or 2 (SATURATED)."
                     write(*,*) "floating_mode = ", hyd%par%bucket%floating_mode
                     stop
 
@@ -690,10 +694,10 @@ contains
                 do j = 1, ny
                 do i = 1, nx
                     call hydro_calc_N_till(N(i,j), W_til(i,j), H_ice(i,j), &
-                                           f_ice(i,j), f_grnd(i,j), W_til_max(i,j), &
+                                           f_ice(i,j), f_grnd(i,j), z_bed(i,j), z_sl(i,j), W_til_max(i,j), &
                                            par%closures%till%N0, par%closures%till%delta, &
                                            par%closures%till%e0, par%closures%till%Cc, &
-                                           par%closures%rho_ice, par%closures%g)
+                                           par%closures%rho_ice, par%closures%marine%rho_sw, par%closures%g)
                 end do
                 end do
                 !$omp end parallel do
