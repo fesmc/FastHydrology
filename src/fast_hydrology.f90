@@ -31,7 +31,7 @@ module fast_hydrology
     !           (drained englacial water, surface input) [m/s, water-equivalent]
     !
     ! Time / unit convention on the public API:
-    !   hydro_update(... time, ...) : time in YEARS (matches host model)
+    !   hydro_update(... time, ...) : time in YEARS (matches host model), real(dp)
     !   mdot, i_eb, uxy_b, ux_b, uy_b : SI [m/s];  G, q_T : [W/m2]
     !   par%dx, par%dy              : [m]
     ! Internally everything is SI. dt_year (time - hyd%now%time) is computed
@@ -90,7 +90,7 @@ module fast_hydrology
     end type
 
     type hydro_state_class
-        real(wp) :: time
+        real(dp) :: time                           ! [a] time of the last update
         real(wp) :: dt
         logical  :: initialized
         real(wp), allocatable :: W_til(:,:)        ! [m]      till storage (bucket)
@@ -186,7 +186,7 @@ contains
 
         call hydro_allocate(hyd%now, nx, ny)
 
-        hyd%now%time        = 0.0_wp
+        hyd%now%time        = 0.0_dp
         hyd%now%dt          = 0.0_wp
         hyd%now%initialized = .false.
 
@@ -216,7 +216,7 @@ contains
         real(wp),          intent(IN)           :: z_bed(:,:)
         real(wp),          intent(IN)           :: f_ice(:,:)
         real(wp),          intent(IN)           :: f_grnd(:,:)
-        real(wp),          intent(IN)           :: time
+        real(dp),          intent(IN)           :: time
         real(wp),          intent(IN), optional :: W_til(:,:)
         real(wp),          intent(IN), optional :: W(:,:)
         real(wp),          intent(IN), optional :: kappa(:,:)
@@ -335,7 +335,7 @@ contains
         real(wp),          intent(IN)    :: i_eb(:,:)
         real(wp),          intent(IN)    :: uxy_b(:,:)
         real(wp),          intent(IN)    :: A_glen(:,:)
-        real(wp),          intent(IN)    :: time
+        real(dp),          intent(IN)    :: time
         real(wp),          intent(IN), optional :: ux_b(:,:), uy_b(:,:), taub(:,:), c_till(:,:)
 
         ! dp scratch arrays for the K24 boundary
@@ -363,7 +363,7 @@ contains
         W_til_old = hyd%now%W_til
 
         ! API time is in years; convert step to seconds for internal SI.
-        dt_year      = max(time - hyd%now%time, 0.0_wp)
+        dt_year      = real(max(time - hyd%now%time, 0.0_dp), wp)
         dt_sec       = dt_year * hyd%par%sec_year
         hyd%now%time = time
         hyd%now%dt   = dt_sec

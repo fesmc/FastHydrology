@@ -36,9 +36,9 @@ follows van Pelt & Bueler 2015:
 - `G`, `q_T` : geothermal heat into the bed, conductive heat into the ice [W/m2]
 - `i_eb`  : water reaching the bed from above [m/s, water-equivalent]
 
-All internal units are SI. The public API takes `time` in years (matching
-typical ice-sheet model conventions); namelist `bkt_till_rate` is in m/a
-(converted at load time). Output diagnostics (`dW_til_dt`, `overflow`,
+All internal units are SI. The public API takes `time` in years, as
+`real(dp)` (matching typical ice-sheet model conventions); namelist
+`bkt_till_rate` is in m/a (converted at load time). Output diagnostics (`dW_til_dt`, `overflow`,
 `q_x`, `q_y`) are in SI. The grid spacing pair `(dx, dy)` is carried
 throughout — no isotropic-grid assumption.
 

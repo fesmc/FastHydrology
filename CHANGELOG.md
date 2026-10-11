@@ -11,6 +11,9 @@ Format follows [Keep a Changelog](https://keepachangelog.com/); versioning is [S
   `k24_substrate_type = 4` (EXTERNAL) takes kappa from the host through the new optional
   `kappa` argument of `hydro_init_state` (clamped to [0,1]; required for type 4).
 ### Changed
+- Model time in double precision: the `time` argument of `hydro_init_state` and
+  `hydro_update` and `hyd%now%time` are `real(dp)`, so the step `dt` stays exact at
+  large |time| (e.g. -150 kyr). Hosts must pass `real(dp)` time.
 - K24 namelist parameters renamed (fesmc/FastHydrology#14), in step with the
   FastHydrology.jl constructor keywords. Old names are no longer read, so host namelists
   must be updated (an unrecognised key falls back to the default without error):
