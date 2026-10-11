@@ -133,6 +133,12 @@ Deliberate deviations:
   them; this library takes the same limits by an explicit branch instead, since
   it is built with `-Ofast` where `Inf`/`NaN` propagation is not dependable.
   Each such site is marked `DEVIATION:` in `src/k24.f90`.
+- **Sea level.** The hydraulic potential takes the bed elevation relative to
+  sea level, `phi0 = rho_i g H + rho_w g (z_bed - z_sl)` (`calc_k24`'s `z_sl`),
+  so its value at flotation, `(rho_sw - rho_w) g (z_sl - z_bed)`, and with it
+  `N` near the grounding line do not depend on `z_sl`. FastHydrology.jl has no
+  sea level; `z_sl = 0` is identical to it, and a uniform `z_sl` leaves the
+  routing unchanged.
 
 Four clamps that KORI-ULB applies are **off by default**, matching the
 reference constructor: `k24_W_min`, `k24_W_max`, `k24_min_pressure_fraction`

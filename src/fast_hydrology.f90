@@ -339,7 +339,7 @@ contains
         real(wp),          intent(IN), optional :: ux_b(:,:), uy_b(:,:), taub(:,:), c_till(:,:)
 
         ! dp scratch arrays for the K24 boundary
-        real(dp), allocatable :: H_ice_dp(:,:), z_bed_dp(:,:), mask_dp(:,:)
+        real(dp), allocatable :: H_ice_dp(:,:), z_bed_dp(:,:), z_sl_dp(:,:), mask_dp(:,:)
         real(dp), allocatable :: G_dp(:,:), q_T_dp(:,:), i_eb_dp(:,:), uxy_b_dp(:,:), A_glen_dp(:,:)
         real(dp), allocatable :: ux_b_dp(:,:), uy_b_dp(:,:), taub_dp(:,:), c_till_dp(:,:)
         real(dp), allocatable :: Q_b_dp(:,:), Q_diss_dp(:,:), C_frz_dp(:,:)
@@ -403,7 +403,7 @@ contains
 
             case (TRANSPORT_K24)
                 if (dt_sec > 0.0_wp) then
-                    allocate(H_ice_dp(nx,ny), z_bed_dp(nx,ny), mask_dp(nx,ny))
+                    allocate(H_ice_dp(nx,ny), z_bed_dp(nx,ny), z_sl_dp(nx,ny), mask_dp(nx,ny))
                     allocate(G_dp(nx,ny), q_T_dp(nx,ny), i_eb_dp(nx,ny), uxy_b_dp(nx,ny), A_glen_dp(nx,ny))
                     allocate(ux_b_dp(nx,ny), uy_b_dp(nx,ny), taub_dp(nx,ny), c_till_dp(nx,ny))
                     allocate(Q_b_dp(nx,ny), Q_diss_dp(nx,ny), C_frz_dp(nx,ny))
@@ -413,6 +413,7 @@ contains
 
                     H_ice_dp  = real(H_ice,           dp)
                     z_bed_dp  = real(z_bed,           dp)
+                    z_sl_dp   = real(z_sl,            dp)
                     mask_dp   = real(mask,            dp)
                     G_dp      = real(G,               dp)
                     q_T_dp    = real(q_T,             dp)
@@ -438,20 +439,20 @@ contains
                     ! that is missing.
                     if (present(ux_b) .and. present(uy_b) .and. present(taub) .and. present(c_till)) then
                         call calc_k24(q_x_dp, q_y_dp, N_dp, p_w_dp, W_dp, q_dp, Q_b_dp, Q_diss_dp, &
-                                      H_ice_dp, z_bed_dp, mask_dp, G_dp, q_T_dp, i_eb_dp, uxy_b_dp, A_glen_dp, &
+                                      H_ice_dp, z_bed_dp, z_sl_dp, mask_dp, G_dp, q_T_dp, i_eb_dp, uxy_b_dp, A_glen_dp, &
                                       kappa_dp, real(hyd%par%dx, dp), real(hyd%par%dy, dp), hyd%par%k24, &
                                       ux_b=ux_b_dp, uy_b=uy_b_dp, tau_b_in=taub_dp, c_till_in=c_till_dp, &
                                       diss_io=hyd%now%diss_face, C_frz=C_frz_dp, &
                                       absg_out=hyd%now%k24_abs_g, phi0_out=hyd%now%k24_phi0)
                     else if (present(ux_b) .and. present(uy_b)) then
                         call calc_k24(q_x_dp, q_y_dp, N_dp, p_w_dp, W_dp, q_dp, Q_b_dp, Q_diss_dp, &
-                                      H_ice_dp, z_bed_dp, mask_dp, G_dp, q_T_dp, i_eb_dp, uxy_b_dp, A_glen_dp, &
+                                      H_ice_dp, z_bed_dp, z_sl_dp, mask_dp, G_dp, q_T_dp, i_eb_dp, uxy_b_dp, A_glen_dp, &
                                       kappa_dp, real(hyd%par%dx, dp), real(hyd%par%dy, dp), hyd%par%k24, &
                                       ux_b=ux_b_dp, uy_b=uy_b_dp, diss_io=hyd%now%diss_face, C_frz=C_frz_dp, &
                                       absg_out=hyd%now%k24_abs_g, phi0_out=hyd%now%k24_phi0)
                     else
                         call calc_k24(q_x_dp, q_y_dp, N_dp, p_w_dp, W_dp, q_dp, Q_b_dp, Q_diss_dp, &
-                                      H_ice_dp, z_bed_dp, mask_dp, G_dp, q_T_dp, i_eb_dp, uxy_b_dp, A_glen_dp, &
+                                      H_ice_dp, z_bed_dp, z_sl_dp, mask_dp, G_dp, q_T_dp, i_eb_dp, uxy_b_dp, A_glen_dp, &
                                       kappa_dp, real(hyd%par%dx, dp), real(hyd%par%dy, dp), hyd%par%k24, &
                                       diss_io=hyd%now%diss_face, C_frz=C_frz_dp, &
                                       absg_out=hyd%now%k24_abs_g, phi0_out=hyd%now%k24_phi0)
@@ -468,7 +469,7 @@ contains
                     hyd%now%C_frz  = real(C_frz_dp,  wp)
                     hyd%now%k24_routed = .true.
 
-                    deallocate(H_ice_dp, z_bed_dp, mask_dp)
+                    deallocate(H_ice_dp, z_bed_dp, z_sl_dp, mask_dp)
                     deallocate(G_dp, q_T_dp, i_eb_dp, uxy_b_dp, A_glen_dp)
                     deallocate(ux_b_dp, uy_b_dp, taub_dp, c_till_dp, Q_b_dp, Q_diss_dp, C_frz_dp)
                     deallocate(kappa_dp)

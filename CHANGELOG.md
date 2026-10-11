@@ -11,6 +11,12 @@ Format follows [Keep a Changelog](https://keepachangelog.com/); versioning is [S
   `k24_substrate_type = 4` (EXTERNAL) takes kappa from the host through the new optional
   `kappa` argument of `hydro_init_state` (clamped to [0,1]; required for type 4).
 ### Changed
+- K24 hydraulic potential referenced to sea level: `phi0 = rho_i g H + rho_w g (z_bed - z_sl)`
+  (deviation 6 from FastHydrology.jl). N depends on `phi0` itself, and with the absolute bed its
+  value at flotation, `rho_sw g (z_sl - z_bed) + rho_w g z_bed`, moved with sea level; it is now
+  `(rho_sw - rho_w) g (z_sl - z_bed)` for any `z_sl`. No change for `z_sl = 0`; a uniform `z_sl`
+  shifts `phi0` by a constant and leaves the routing unchanged. **Breaking:** `calc_k24` takes
+  `z_sl` after `z_bed` (`hydro_update` already had it).
 - Till closure (`bkt_N_closure = 3`) continuous at flotation: `N = min(N_till, N_marine)`, with
   the marine N for full connectivity (p = 1), `rho_ice g H_eff - rho_sw g max(z_sl - z_bed, 0)`
   clipped at 0. Before, N kept the till value (up to the overburden on dry till) up to
