@@ -40,6 +40,9 @@ On floating and ocean cells (`f_grnd == 0`) the bucket holds no water of its own
 `bkt_floating_mode` sets what `W_til` is there: 0 (ZERO) dry, 1 (MARGIN_FILL)
 saturated plus a saturated ring of grounded cells next to floating ice (legacy),
 2 (SATURATED, default) saturated, so ice that grounds starts from saturated till.
+The till closure (`bkt_N_closure = 3`) is capped by the marine closure with full
+ocean connectivity (`p = 1`), `rho_ice g H - rho_sw g max(z_sl - z_bed, 0)`, so `N`
+goes to 0 continuously as grounded ice approaches flotation.
 
 All internal units are SI. The public API takes `time` in years, as
 `real(dp)` (matching typical ice-sheet model conventions); namelist

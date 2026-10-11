@@ -693,10 +693,10 @@ contains
                 do j = 1, ny
                 do i = 1, nx
                     call hydro_calc_N_till(N(i,j), W_til(i,j), H_ice(i,j), &
-                                           f_ice(i,j), f_grnd(i,j), W_til_max(i,j), &
+                                           f_ice(i,j), f_grnd(i,j), z_bed(i,j), z_sl(i,j), W_til_max(i,j), &
                                            par%closures%till%N0, par%closures%till%delta, &
                                            par%closures%till%e0, par%closures%till%Cc, &
-                                           par%closures%rho_ice, par%closures%g)
+                                           par%closures%rho_ice, par%closures%marine%rho_sw, par%closures%g)
                 end do
                 end do
                 !$omp end parallel do

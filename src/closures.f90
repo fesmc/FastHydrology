@@ -22,7 +22,7 @@ module fast_hydrology_closures
     integer, parameter, public :: N_CLOSURE_CONST      = 0  ! constant N_eff (also covers the old NONE case)
     integer, parameter, public :: N_CLOSURE_OVERBURDEN = 1
     integer, parameter, public :: N_CLOSURE_MARINE     = 2  ! Leguy 2014
-    integer, parameter, public :: N_CLOSURE_TILL       = 3  ! van Pelt & Bueler 2015
+    integer, parameter, public :: N_CLOSURE_TILL       = 3  ! van Pelt & Bueler 2015, capped by MARINE with p = 1
     integer, parameter, public :: N_CLOSURE_TWO_VALUE  = 4  ! standalone-only
 
     type closure_marine_param_class
@@ -168,16 +168,23 @@ contains
     end subroutine hydro_calc_N_marine
 
     ! ============================================================
-    ! Till: van Pelt & Bueler 2015, Eq. 23
+    ! Till: van Pelt & Bueler 2015, Eq. 23, capped by the marine N
     ! ============================================================
-    elemental subroutine hydro_calc_N_till(N, W_til, H_ice, f_ice, f_grnd, W_til_max, &
-                                          N0, delta, e0, Cc, rho_ice, g)
+    ! N is limited to the marine effective pressure with full ocean
+    ! connectivity (Leguy 2014, p = 1), N_marine = rho_ice g H_eff -
+    ! rho_sw g max(z_sl - z_bed, 0), clipped at 0. So N -> 0 continuously as
+    ! the ice approaches flotation, whatever the till water, instead of
+    ! jumping from the till value to 0 (f_grnd == 0) when the cell floats.
+    ! On land (z_bed >= z_sl) N_marine is the overburden and the cap is
+    ! inactive.
+    elemental subroutine hydro_calc_N_till(N, W_til, H_ice, f_ice, f_grnd, z_bed, z_sl, W_til_max, &
+                                          N0, delta, e0, Cc, rho_ice, rho_sw, g)
 
         real(wp), intent(OUT) :: N
-        real(wp), intent(IN)  :: W_til, H_ice, f_ice, f_grnd
-        real(wp), intent(IN)  :: W_til_max, N0, delta, e0, Cc, rho_ice, g
+        real(wp), intent(IN)  :: W_til, H_ice, f_ice, f_grnd, z_bed, z_sl
+        real(wp), intent(IN)  :: W_til_max, N0, delta, e0, Cc, rho_ice, rho_sw, g
 
-        real(wp) :: H_eff, P0, s, q1
+        real(wp) :: H_eff, P0, s, q1, N_marine
 
         if (f_grnd == 0.0_wp) then
             N = 0.0_wp
@@ -196,6 +203,9 @@ contains
         q1 = min(q1, 10.0_wp)
 
         N = min( N0 * (delta * P0 / N0)**s * 10.0_wp**q1, P0 )
+
+        call hydro_calc_N_marine(N_marine, H_ice, f_ice, z_bed, z_sl, 1.0_wp, rho_ice, rho_sw, g)
+        N = min(N, N_marine)
 
     end subroutine hydro_calc_N_till
 

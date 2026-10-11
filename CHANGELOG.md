@@ -11,6 +11,12 @@ Format follows [Keep a Changelog](https://keepachangelog.com/); versioning is [S
   `k24_substrate_type = 4` (EXTERNAL) takes kappa from the host through the new optional
   `kappa` argument of `hydro_init_state` (clamped to [0,1]; required for type 4).
 ### Changed
+- Till closure (`bkt_N_closure = 3`) continuous at flotation: `N = min(N_till, N_marine)`, with
+  the marine N for full connectivity (p = 1), `rho_ice g H_eff - rho_sw g max(z_sl - z_bed, 0)`
+  clipped at 0. Before, N kept the till value (up to the overburden on dry till) up to
+  flotation and dropped to 0 when the cell floated. No change on land (`z_bed >= z_sl`); on
+  marine-grounded ice the cap binds where the till N exceeds it, i.e. close to flotation or on
+  dry till. **Breaking:** `hydro_calc_N_till` takes `z_bed`, `z_sl` and `rho_sw`.
 - New `bkt_floating_mode = 2` (SATURATED), now the default (`input/yelmo_defaults.nml`, code
   fallback, `par/*.nml`, `examples/greenland`): floating and ocean cells (`f_grnd == 0`) get
   `W_til = W_til_max`, grounded ice-free cells 0, grounded ice keeps its bucket value; no
