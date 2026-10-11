@@ -17,12 +17,15 @@ Format follows [Keep a Changelog](https://keepachangelog.com/); versioning is [S
   `(rho_sw - rho_w) g (z_sl - z_bed)` for any `z_sl`. No change for `z_sl = 0`; a uniform `z_sl`
   shifts `phi0` by a constant and leaves the routing unchanged. **Breaking:** `calc_k24` takes
   `z_sl` after `z_bed` (`hydro_update` already had it).
-- Till closure (`bkt_N_closure = 3`) continuous at flotation: `N = min(N_till, N_marine)`, with
-  the marine N for full connectivity (p = 1), `rho_ice g H_eff - rho_sw g max(z_sl - z_bed, 0)`
-  clipped at 0. Before, N kept the till value (up to the overburden on dry till) up to
-  flotation and dropped to 0 when the cell floated. No change on land (`z_bed >= z_sl`); on
-  marine-grounded ice the cap binds where the till N exceeds it, i.e. close to flotation or on
-  dry till. **Breaking:** `hydro_calc_N_till` takes `z_bed`, `z_sl` and `rho_sw`.
+- Till closure (`bkt_N_closure = 3`) continuous at flotation:
+  `N = min(N_till, N_marine/till_delta)`, with the marine N for full connectivity (p = 1),
+  `N_marine = rho_ice g H_eff - rho_sw g max(z_sl - z_bed, 0) = rho_ice g H_af`, clipped at 0.
+  Before, N kept the till value (up to the overburden on dry till) up to flotation and dropped
+  to 0 when the cell floated. The cap binds only where `N_marine < till_delta * N_till`, i.e.
+  where the height above flotation `H_af < till_delta * N_till/(rho_ice g) <= till_delta * H_eff`;
+  no change on land (`z_bed >= z_sl`) or farther from flotation. (A cap at `N_marine` itself
+  would replace the dry-till overburden by `rho_ice g H_af` on every marine bed.)
+  **Breaking:** `hydro_calc_N_till` takes `z_bed`, `z_sl` and `rho_sw`.
 - New `bkt_floating_mode = 2` (SATURATED), now the default (`input/yelmo_defaults.nml`, code
   fallback, `par/*.nml`, `examples/greenland`): floating and ocean cells (`f_grnd == 0`) get
   `W_til = W_til_max`, grounded ice-free cells 0, grounded ice keeps its bucket value; no
