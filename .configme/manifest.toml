@@ -1,5 +1,5 @@
 # configme manifest for FastHydrology.
 package = "FastHydrology"
 deps = [
-    "fesm-utils",
+    "fesm-utils:2.4-beta",
 ]
