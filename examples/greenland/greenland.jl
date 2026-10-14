@@ -2,7 +2,6 @@ using NCDatasets
 using Statistics
 using FastHydrology
 using CairoMakie
-using Oceananigans
 
 function load_data(path::String; bed_rheology = :hard)
 
@@ -148,7 +147,7 @@ function main()
     # fesmc/FastHydrology#5.
     coupling_length_kamb86 = 0.0
     Nx, Ny, xlims, ylims, mask, h, b, abs_v_b, A_visc, ṁ, κ, x, y = load_data(data_dir);
-    grid = OGRectHydroGrid(Nx, Ny, xlims, ylims; T = Float64)
+    grid = ArrayHydroGrid(Nx, Ny, xlims, ylims; T = Float64)
     # The restart has the melt rate only: supply the same melt as geothermal heat G = ṁ*L_w.
     G   = ṁ .* 3.34e5
     q_T = zero(G)
@@ -157,11 +156,11 @@ function main()
     sim = SteadyStateSimulation(model, grid, state);
     FastHydrology.run!(sim)
 
-    H_w = Oceananigans.interior(state.W, :, :, 1)
-    N = Oceananigans.interior(state.N, :, :, 1)
-    Po = model.rho_i .* model.g .* Oceananigans.interior(state.h, :, :, 1)
+    H_w = state.W
+    N = state.N
+    Po = model.rho_i .* model.g .* state.h
     p_w = Po .- N
-    q = Oceananigans.interior(model.q, :, :, 1)
+    q = model.q
 
     f_grnd = mask
 

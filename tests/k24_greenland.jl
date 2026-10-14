@@ -2,7 +2,7 @@
 # the Greenland-16km restart with the same inputs k24_compare.f90 feeds the
 # Fortran library, and dump the result for a field-by-field comparison.
 #
-# Uses ArrayHydroGrid (plain arrays) rather than OGRectHydroGrid: the
+# Uses ArrayHydroGrid (plain arrays): the
 # grid-interface DEFAULT implementations -- edge-clamped central differences,
 # replicate-padded cached FFT convolution -- are exactly what the Fortran port
 # mirrors, so this is the direct reference.
