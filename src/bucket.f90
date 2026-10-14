@@ -50,15 +50,23 @@ module fast_hydrology_bucket
 
     ! ---------- Floating/margin override enum (par%floating_mode) ----------
     ! Controls how W_til is treated on non-interior cells after the bucket step.
-    !   ZERO        : library default. Floating, ocean and grounded-ice-free
-    !                 cells are set to 0 (apply_floating_override).
+    !   ZERO        : floating, ocean and grounded-ice-free cells are set to 0
+    !                 (apply_floating_override). Ice that grounds onto such a
+    !                 cell starts from dry till.
     !   MARGIN_FILL : legacy ytherm bucket behaviour. Floating cells and
     !                 grounded full-ice cells adjacent to a floating neighbour
     !                 are saturated to W_til_max (a pinned, lubricated margin
     !                 ring); grounded partial-ice cells are set to 0
     !                 (apply_margin_fill). Reproduces the inline host bucket.
+    !   SATURATED   : library default. Floating and ocean cells (f_grnd == 0)
+    !                 are saturated to W_til_max, grounded-ice-free cells are
+    !                 set to 0, grounded ice keeps its bucket value -- no
+    !                 margin ring (apply_floating_saturated). Ice that grounds
+    !                 onto a cell starts from saturated till, so N does not
+    !                 jump from 0 to the overburden at re-grounding.
     integer, parameter, public :: FLOATING_ZERO        = 0
     integer, parameter, public :: FLOATING_MARGIN_FILL = 1
+    integer, parameter, public :: FLOATING_SATURATED   = 2
 
     type bucket_param_class
         real(wp) :: till_rate          ! background till drainage [m/s] (namelist value is m/a)
@@ -72,6 +80,7 @@ module fast_hydrology_bucket
     public :: calc_bucket
     public :: apply_floating_override
     public :: apply_margin_fill
+    public :: apply_floating_saturated
     public :: apply_mask_bc
 
 contains
@@ -97,7 +106,7 @@ contains
         ! Defaults in namelist units (m/a) for till_rate.
         par%till_rate     = 1.0e-3_wp
         par%N_closure     = 0
-        par%floating_mode = FLOATING_ZERO
+        par%floating_mode = FLOATING_SATURATED
 
         call nml_read(filename,group,"bkt_till_rate",     par%till_rate,     init=init_pars,defaults_file=def_file,defaults_group=def_group)
         call nml_read(filename,group,"bkt_N_closure",     par%N_closure,     init=init_pars,defaults_file=def_file,defaults_group=def_group)
@@ -117,7 +126,7 @@ contains
         ! of the source that did NOT fit in the till and is available to feed
         ! the transport model downstream. No W_til_max fill is applied on
         ! floating / adjacent-to-floating cells; that is the caller's job
-        ! via apply_floating_override + apply_mask_bc.
+        ! via the par%floating_mode override + apply_mask_bc.
 
         implicit none
 
@@ -274,6 +283,49 @@ contains
         return
 
     end subroutine apply_margin_fill
+
+    ! ------------------------------------------------------------
+    ! Saturated floating cells (FLOATING_SATURATED). Floating cells are those
+    ! of apply_margin_fill (f_grnd == 0, also ice-free ocean); there is no
+    ! margin ring:
+    !   * floating / ocean (f_grnd == 0)                  -> W_til = W_til_max
+    !   * grounded ice-free (f_grnd > 0, f_ice == 0)       -> W_til = 0
+    !   * grounded ice (f_grnd > 0, f_ice > 0)             -> keep bucket value
+    ! A cell that grounds then starts its bucket from W_til_max: the till below
+    ! an ice shelf is saturated, and N stays continuous through re-grounding.
+    ! ------------------------------------------------------------
+    subroutine apply_floating_saturated(W_til, f_ice, f_grnd, W_til_max)
+
+        implicit none
+
+        real(wp), intent(INOUT) :: W_til(:,:)
+        real(wp), intent(IN)    :: f_ice(:,:)
+        real(wp), intent(IN)    :: f_grnd(:,:)
+        real(wp), intent(IN)    :: W_til_max(:,:)
+
+        integer :: i, j, nx, ny
+
+        nx = size(f_ice,1)
+        ny = size(f_ice,2)
+
+        !$omp parallel do default(shared) private(i,j) schedule(static)
+        do j = 1, ny
+        do i = 1, nx
+            if (f_grnd(i,j) == 0.0_wp) then
+                ! Floating or ice-free ocean point - saturate
+                W_til(i,j) = W_til_max(i,j)
+            else if (f_ice(i,j) == 0.0_wp) then
+                ! Grounded ice-free point - dry
+                W_til(i,j) = 0.0_wp
+            end if
+            ! else: grounded ice - keep the bucket value
+        end do
+        end do
+        !$omp end parallel do
+
+        return
+
+    end subroutine apply_floating_saturated
 
     subroutine apply_mask_bc(W_til, mask_bc, W_til_bc, periodic_x, periodic_y)
         ! Apply the domain-border BC at the i=1, i=nx, j=1, j=ny rim.

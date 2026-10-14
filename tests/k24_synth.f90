@@ -38,7 +38,7 @@ program k24_synth
 
     real(dp) :: dx, dy, qtfrac, iebfrac, ubfac
     real(dp), allocatable :: N_ub(:,:), uxy_b_new(:,:)
-    real(dp), allocatable :: h(:,:), b(:,:), mask(:,:), mdot(:,:)
+    real(dp), allocatable :: h(:,:), b(:,:), z_sl(:,:), mask(:,:), mdot(:,:)
     real(dp), allocatable :: uxy_b(:,:), A_glen(:,:), kappa(:,:)
     real(dp), allocatable :: G(:,:), q_T(:,:), i_eb(:,:), ux_b(:,:), uy_b(:,:), taub(:,:), c_till(:,:)
     real(dp), allocatable :: q_x(:,:), q_y(:,:), N(:,:), p_w(:,:), W(:,:), q(:,:), Q_b(:,:), Q_diss(:,:), C_frz(:,:)
@@ -78,7 +78,7 @@ program k24_synth
     ny = nc_size(in_file, "yc")
 
     allocate(xc(nx), yc(ny))
-    allocate(h(nx,ny), b(nx,ny), mask(nx,ny), mdot(nx,ny))
+    allocate(h(nx,ny), b(nx,ny), z_sl(nx,ny), mask(nx,ny), mdot(nx,ny))
     allocate(uxy_b(nx,ny), A_glen(nx,ny), kappa(nx,ny))
     allocate(G(nx,ny), q_T(nx,ny), i_eb(nx,ny), ux_b(nx,ny), uy_b(nx,ny), taub(nx,ny), c_till(nx,ny))
     allocate(q_x(nx,ny), q_y(nx,ny), N(nx,ny), p_w(nx,ny), W(nx,ny), q(nx,ny), Q_b(nx,ny), Q_diss(nx,ny), C_frz(nx,ny))
@@ -96,6 +96,9 @@ program k24_synth
     call nc_read(in_file, "A",    A_glen)
     call nc_read(in_file, "mdot", mdot)
 
+    ! FastHydrology.jl has no sea level: its potential is that of z_sl = 0.
+    z_sl = 0.0_dp
+
     ! Same operations, in the same order, as tests/k24_synth.jl.
     G      = mdot * 1000.0_dp * 3.34e5_dp
     q_T    = qtfrac * G
@@ -105,13 +108,13 @@ program k24_synth
     taub   = 2.0e4_dp + uxy_b * 1.0e10_dp
     c_till = par%reg_coulomb_c_till * (1.0_dp + uxy_b * 1.0e5_dp)
 
-    call initialize_kappa(kappa, b, par%substrate_type)
+    call initialize_kappa(kappa, b, par%substrate_type, par%kappa_z_hard, par%kappa_z_soft)
 
     q = 0.0_dp
     N = 0.0_dp
 
     call calc_k24(q_x, q_y, N, p_w, W, q, Q_b, Q_diss, &
-                  h, b, mask, G, q_T, i_eb, uxy_b, A_glen, kappa, dx, dy, par, &
+                  h, b, z_sl, mask, G, q_T, i_eb, uxy_b, A_glen, kappa, dx, dy, par, &
                   ux_b=ux_b, uy_b=uy_b, tau_b_in=taub, c_till_in=c_till, C_frz=C_frz, &
                   gsx_out=gsx, gsy_out=gsy, absgs_out=absgs, absg_out=absg, phi0_out=phi0)
 

@@ -22,7 +22,7 @@ module fast_hydrology_closures
     integer, parameter, public :: N_CLOSURE_CONST      = 0  ! constant N_eff (also covers the old NONE case)
     integer, parameter, public :: N_CLOSURE_OVERBURDEN = 1
     integer, parameter, public :: N_CLOSURE_MARINE     = 2  ! Leguy 2014
-    integer, parameter, public :: N_CLOSURE_TILL       = 3  ! van Pelt & Bueler 2015
+    integer, parameter, public :: N_CLOSURE_TILL       = 3  ! van Pelt & Bueler 2015, capped by MARINE (p = 1) / till_delta
     integer, parameter, public :: N_CLOSURE_TWO_VALUE  = 4  ! standalone-only
 
     type closure_marine_param_class
@@ -168,16 +168,29 @@ contains
     end subroutine hydro_calc_N_marine
 
     ! ============================================================
-    ! Till: van Pelt & Bueler 2015, Eq. 23
+    ! Till: van Pelt & Bueler 2015, Eq. 23, capped near flotation
     ! ============================================================
-    elemental subroutine hydro_calc_N_till(N, W_til, H_ice, f_ice, f_grnd, W_til_max, &
-                                          N0, delta, e0, Cc, rho_ice, g)
+    ! N is limited to N_marine/delta, with N_marine the marine effective
+    ! pressure for full ocean connectivity (Leguy 2014, p = 1),
+    ! N_marine = rho_ice g H_eff - rho_sw g max(z_sl - z_bed, 0) = rho_ice g H_af
+    ! (H_af: thickness above flotation), clipped at 0. So N -> 0 continuously
+    ! as the ice approaches flotation, instead of jumping from the till value
+    ! to 0 (f_grnd == 0) when the cell floats. The cap binds only where
+    ! N_marine < delta * N_till, i.e. rho_ice g H_af < delta * N_till; since
+    ! N_till <= P0 = rho_ice g H_eff, only where H_af < delta * H_eff (within
+    ! ~1/delta of flotation; for saturated till, N_till = delta P0, only where
+    ! H_af < delta**2 H_eff). Elsewhere, and on land (z_bed >= z_sl, where
+    ! N_marine = P0), the till closure is unchanged. Dividing by delta keeps
+    ! the cap near flotation: N_marine alone would replace a dry-till
+    ! N = P0 by rho_ice g H_af on every marine bed. delta = 0 disables it.
+    elemental subroutine hydro_calc_N_till(N, W_til, H_ice, f_ice, f_grnd, z_bed, z_sl, W_til_max, &
+                                          N0, delta, e0, Cc, rho_ice, rho_sw, g)
 
         real(wp), intent(OUT) :: N
-        real(wp), intent(IN)  :: W_til, H_ice, f_ice, f_grnd
-        real(wp), intent(IN)  :: W_til_max, N0, delta, e0, Cc, rho_ice, g
+        real(wp), intent(IN)  :: W_til, H_ice, f_ice, f_grnd, z_bed, z_sl
+        real(wp), intent(IN)  :: W_til_max, N0, delta, e0, Cc, rho_ice, rho_sw, g
 
-        real(wp) :: H_eff, P0, s, q1
+        real(wp) :: H_eff, P0, s, q1, N_marine
 
         if (f_grnd == 0.0_wp) then
             N = 0.0_wp
@@ -196,6 +209,9 @@ contains
         q1 = min(q1, 10.0_wp)
 
         N = min( N0 * (delta * P0 / N0)**s * 10.0_wp**q1, P0 )
+
+        call hydro_calc_N_marine(N_marine, H_ice, f_ice, z_bed, z_sl, 1.0_wp, rho_ice, rho_sw, g)
+        if (N_marine < delta * N) N = N_marine / delta
 
     end subroutine hydro_calc_N_till
 
