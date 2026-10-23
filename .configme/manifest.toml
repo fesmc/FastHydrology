@@ -3,5 +3,5 @@
 # dependency tags.
 package = "FastHydrology"
 deps = [
-    "fesm-utils:v1.4",
+    "fesm-utils:stable",
 ]
