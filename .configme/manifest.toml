@@ -1,5 +1,7 @@
 # configme manifest for FastHydrology.
+# Pins: stable (== main) for every dependency; a tagged release pins the
+# dependency tags.
 package = "FastHydrology"
 deps = [
-    "fesm-utils",
+    "fesm-utils:stable",
 ]
