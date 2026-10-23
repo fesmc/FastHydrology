@@ -4,7 +4,50 @@ All notable changes to FastHydrology are documented here.
 Format follows [Keep a Changelog](https://keepachangelog.com/); versioning is [SemVer](https://semver.org/).
 
 ## [Unreleased]
+### Added
+- K24 bed hardness `kappa` (fesmc/FastHydrology#7): `k24_substrate_type = 3` (MIXED_SMOOTH)
+  ramps kappa linearly in `z_bed` from 0 at `k24_kappa_z_hard` (default -500 m) to 1 at
+  `k24_kappa_z_soft` (default -1500 m), as FastHydrology.jl `bed_rheology = :mixed_smooth`.
+  `k24_substrate_type = 4` (EXTERNAL) takes kappa from the host through the new optional
+  `kappa` argument of `hydro_init_state` (clamped to [0,1]; required for type 4).
 ### Changed
+- K24 hydraulic potential referenced to sea level: `phi0 = rho_i g H + rho_w g (z_bed - z_sl)`
+  (deviation 6 from FastHydrology.jl). N depends on `phi0` itself, and with the absolute bed its
+  value at flotation, `rho_sw g (z_sl - z_bed) + rho_w g z_bed`, moved with sea level; it is now
+  `(rho_sw - rho_w) g (z_sl - z_bed)` for any `z_sl`. No change for `z_sl = 0`; a uniform `z_sl`
+  shifts `phi0` by a constant and leaves the routing unchanged. **Breaking:** `calc_k24` takes
+  `z_sl` after `z_bed` (`hydro_update` already had it).
+- Till closure (`bkt_N_closure = 3`) continuous at flotation:
+  `N = min(N_till, N_marine/till_delta)`, with the marine N for full connectivity (p = 1),
+  `N_marine = rho_ice g H_eff - rho_sw g max(z_sl - z_bed, 0) = rho_ice g H_af`, clipped at 0.
+  Before, N kept the till value (up to the overburden on dry till) up to flotation and dropped
+  to 0 when the cell floated. The cap binds only where `N_marine < till_delta * N_till`, i.e.
+  where the height above flotation `H_af < till_delta * N_till/(rho_ice g) <= till_delta * H_eff`;
+  no change on land (`z_bed >= z_sl`) or farther from flotation. (A cap at `N_marine` itself
+  would replace the dry-till overburden by `rho_ice g H_af` on every marine bed.)
+  **Breaking:** `hydro_calc_N_till` takes `z_bed`, `z_sl` and `rho_sw`.
+- New `bkt_floating_mode = 2` (SATURATED), now the default (`input/yelmo_defaults.nml`, code
+  fallback, `par/*.nml`, `examples/greenland`): floating and ocean cells (`f_grnd == 0`) get
+  `W_til = W_til_max`, grounded ice-free cells 0, grounded ice keeps its bucket value; no
+  grounded margin ring as in MARGIN_FILL (1). Under ZERO (0) ice that re-grounded onto dry till
+  jumped from N = 0 to the full overburden in one step with the till closure, so the grounding
+  line flipped grounded/floating every step (Yelmo TROUGH-F17 `cf_ref = 5`, killed by `dt_min`).
+  `input/yelmo_defaults.nml` still had 1 from before the 1 -> 0 change below.
+- Model time in double precision: the `time` argument of `hydro_init_state` and
+  `hydro_update` and `hyd%now%time` are `real(dp)`, so the step `dt` stays exact at
+  large |time| (e.g. -150 kyr). Hosts must pass `real(dp)` time.
+- K24 namelist parameters renamed (fesmc/FastHydrology#14), in step with the
+  FastHydrology.jl constructor keywords. Old names are no longer read, so host namelists
+  must be updated (an unrecognised key falls back to the default without error):
+  `k24_ub_hook` -> `k24_N_ub_coupled`, `k24_manning_exponent` -> `k24_glen_n`,
+  `k24_manning_coefficient_exponent` -> `k24_flux_W_exponent`,
+  `k24_bed_friction_exponent` -> `k24_flux_grad_exponent`,
+  `k24_bed_thickness` -> `k24_bed_bump_height`,
+  `k24_initial_cavity_height` -> `k24_H0_efficient`,
+  `k24_coupling_length` -> `k24_conduit_spacing`, `k24_eta_w` -> `k24_water_viscosity`,
+  `k24_max_coupling_iters` / `k24_coupling_rtol` / `k24_coupling_verbose` ->
+  `k24_max_qN_iters` / `k24_qN_rtol` / `k24_qN_verbose`. Values and defaults unchanged;
+  `k24_coupling_length_kamb86` keeps its name.
 - K24 freeze-on capacity `C_frz` includes the water from above: it is now
   `(rho_w*Psi_in/(dx*dy) + i_eb)/rho_i`, not `rho_w*Psi_in/(rho_i*dx*dy)`. `i_eb`
   (Yelmo's drained englacial water `melt_int`) is water that reaches the cell and can be

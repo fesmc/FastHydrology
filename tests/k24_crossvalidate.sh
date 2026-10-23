@@ -36,7 +36,7 @@ run_case () {
     cp "$NML_SRC" "$nml"
     # keep the per-iteration Picard chatter out of the log
     sed_i 's/^    k24_dissipation_verbose          = True/    k24_dissipation_verbose          = False/;
-            s/^    k24_coupling_verbose             = True/    k24_coupling_verbose             = False/' "$nml"
+            s/^    k24_qN_verbose                   = True/    k24_qN_verbose                   = False/' "$nml"
     # NML_SRC (par/k24_greenland.nml) sets k24_coupling_length_kamb86 = 0.0, correct for its own
     # 16 km grid but not for SYNTH's much finer dx=2000/dy=3000 (k24_synth_gen.jl). Re-normalize
     # to the model's default 10.0 so this file's Greenland-specific value doesn't silently change
@@ -90,6 +90,7 @@ run_case soft_efficient "substrate=soft drainage=efficient"     "${ST}1/" "${DR}
 run_case soft_ineff     "substrate=soft drainage=inefficient"   "${ST}1/" "${DR}2/"
 run_case mixed_both     "substrate=mixed"                       "${ST}2/"
 run_case mixed_eff      "substrate=mixed drainage=efficient"    "${ST}2/" "${DR}1/"
+run_case mixed_smooth   "substrate=mixed_smooth"                "${ST}3/"
 run_case hard_ineff     "drainage=inefficient"                  "${DR}2/"
 run_case laminar_mean   "wthick=laminar"                        "${WT}1/"
 run_case laminar_local  "wthick=laminar grad=local"             "${WT}1/" "${GC}1/"
