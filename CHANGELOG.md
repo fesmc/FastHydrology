@@ -3,7 +3,7 @@
 All notable changes to FastHydrology are documented here.
 Format follows [Keep a Changelog](https://keepachangelog.com/); versioning is [SemVer](https://semver.org/).
 
-## [Unreleased]
+## [v0.4] - 2026-10-23
 ### Added
 - K24 bed hardness `kappa` (fesmc/FastHydrology#7): `k24_substrate_type = 3` (MIXED_SMOOTH)
   ramps kappa linearly in `z_bed` from 0 at `k24_kappa_z_hard` (default -500 m) to 1 at
